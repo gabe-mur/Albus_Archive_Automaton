@@ -1,0 +1,42 @@
+# Archival Media Downloader
+
+A simple macOS desktop app for downloading video or image media from URLs. It uses a Tkinter interface and can queue multiple downloads, optionally use browser cookies, and fall back to scanning a page for direct media links.
+
+## Requirements
+
+- Python 3.9+
+- macOS (the app is designed for macOS and includes a .command launcher)
+- ffmpeg available on your system or bundled via Python
+
+## Install dependencies
+
+Open Terminal and run these commands from this folder:
+
+```bash
+brew install python ffmpeg
+python3 -m pip install -r requirements.txt
+```
+
+These commands install the Homebrew packages and Python dependencies needed to run the app on macOS.
+
+## Run the app
+
+Open the launcher file in this folder:
+
+```text
+Open_Archival_Media_Downloader.command
+```
+
+## How to use it
+
+1. Choose a save folder.
+2. Paste one or more media URLs into the queue.
+3. Optionally enter a custom file name without an extension.
+4. Choose Video or Images mode.
+5. Click Add to Queue, then Start Queue.
+
+## Notes
+
+- The app uses yt-dlp for most downloads.
+- If yt-dlp fails, it can attempt to scan the page for direct media URLs.
+- Browser cookies are only used for yt-dlp-based downloads and are not saved by the app.

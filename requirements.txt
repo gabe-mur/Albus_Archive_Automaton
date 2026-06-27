@@ -1,0 +1,4 @@
+pyinstaller
+imageio-ffmpeg
+yt-dlp
+gallery-dl
