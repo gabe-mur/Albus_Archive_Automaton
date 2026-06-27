@@ -27,6 +27,12 @@ Open the launcher file in this folder:
 Open_Archival_Media_Downloader.command
 ```
 
+If macOS shows a warning and blocks it, right-click the file, choose Open, and confirm. This is normal for unsigned scripts. If needed, you can also clear the quarantine flag once in Terminal:
+
+```bash
+xattr -dr com.apple.quarantine Open_Archival_Media_Downloader.command
+```
+
 ## How to use it
 
 1. Choose a save folder.
