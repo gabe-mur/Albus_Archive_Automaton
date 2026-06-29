@@ -20,6 +20,10 @@ from urllib.request import Request, urlopen
 
 
 class QueuedMediaDownloader:
+    SYSTEM_SOUND_DIR = Path("/System/Library/Sounds")
+    COMPLETION_SOUND_NAMES = ("Blow.aiff", "Glass.aiff")
+    COMPLETION_SOUND_VOLUME = 0.6
+
     def __init__(self, root):
         self.root = root
         self.root.title("Archival Media Downloader")
@@ -31,10 +35,14 @@ class QueuedMediaDownloader:
         self.output_folder = tk.StringVar()
         self.use_browser_cookies = tk.BooleanVar(value=False)
         self.scan_direct_media = tk.BooleanVar(value=True)
+        self.auto_start = tk.BooleanVar(value=True)
+        self.audio_lossless_wav = tk.BooleanVar(value=False)
         self.browser_name = tk.StringVar(value="Firefox")
         self.ding_on_complete = tk.BooleanVar(value=True)
         self.status = tk.StringVar(value="Choose a save folder, then add media URLs to the queue.")
         self.progress_status = tk.StringVar(value="Idle")
+        self.progress_value = tk.DoubleVar(value=0)
+        self.progress_percent = tk.StringVar(value="")
 
         self.items = []
         self.current_index = 0
@@ -46,161 +54,356 @@ class QueuedMediaDownloader:
         self.active_log_item = None
         self.log_queue = queue.Queue()
         self.entry_undo_states = {}
+        self.advanced_window = None
+        self.browser_combo = None
+        self.logo_image = None
 
         self.build_ui()
         self.root.after(100, self.process_log_queue)
 
     def build_ui(self):
-        tk.Label(
-            self.root,
-            text="Archival Media Downloader",
-            font=("Arial", 18, "bold")
-        ).pack(anchor="w", padx=14, pady=(14, 8))
+        self.root.minsize(760, 640)
 
-        mode_frame = tk.LabelFrame(self.root, text="Mode")
-        mode_frame.pack(fill="x", padx=14, pady=(0, 10))
+        main = ttk.Frame(self.root, padding=14)
+        main.pack(fill="both", expand=True)
 
-        tk.Radiobutton(
-            mode_frame,
+        self.add_header(main)
+
+        source_frame = ttk.LabelFrame(main, text="Source")
+        source_frame.pack(fill="x", pady=(0, 10))
+
+        mode_row = ttk.Frame(source_frame)
+        mode_row.pack(fill="x", padx=8, pady=(8, 6))
+
+        ttk.Radiobutton(
+            mode_row,
             text="Video",
             variable=self.media_mode,
             value="video"
-        ).pack(side="left", padx=8, pady=6)
+        ).pack(side="left")
 
-        tk.Radiobutton(
-            mode_frame,
+        ttk.Radiobutton(
+            mode_row,
+            text="Audio Only",
+            variable=self.media_mode,
+            value="audio"
+        ).pack(side="left", padx=(12, 0))
+
+        ttk.Radiobutton(
+            mode_row,
             text="Images",
             variable=self.media_mode,
             value="images"
-        ).pack(side="left", padx=8, pady=6)
+        ).pack(side="left", padx=(12, 0))
 
-        tk.Label(self.root, text="Media URL:").pack(anchor="w", padx=14)
-        self.url_entry = tk.Entry(self.root, textvariable=self.url)
-        self.url_entry.pack(fill="x", padx=14, pady=(2, 8))
+        ttk.Label(source_frame, text="Media URL:").pack(anchor="w", padx=8)
+        self.url_entry = ttk.Entry(source_frame, textvariable=self.url)
+        self.url_entry.pack(fill="x", padx=8, pady=(2, 8))
 
-        tk.Label(self.root, text="Save as, optional - no extension needed:").pack(anchor="w", padx=14)
-        self.name_entry = tk.Entry(self.root, textvariable=self.custom_name)
-        self.name_entry.pack(fill="x", padx=14, pady=(2, 8))
+        ttk.Label(source_frame, text="Save as, optional - no extension needed:").pack(anchor="w", padx=8)
+        self.name_entry = ttk.Entry(source_frame, textvariable=self.custom_name)
+        self.name_entry.pack(fill="x", padx=8, pady=(2, 8))
         self.setup_entry_undo(self.url_entry, self.url)
         self.setup_entry_undo(self.name_entry, self.custom_name)
 
-        add_row = tk.Frame(self.root)
-        add_row.pack(fill="x", padx=14, pady=(0, 10))
+        add_row = ttk.Frame(source_frame)
+        add_row.pack(fill="x", padx=8, pady=(0, 8))
 
-        tk.Button(add_row, text="Add to Queue", command=self.add_to_queue).pack(side="left")
-        tk.Button(add_row, text="Remove Selected", command=self.remove_selected).pack(side="left", padx=8)
-        tk.Button(add_row, text="Clear Queue", command=self.clear_queue).pack(side="left")
+        self.add_button = ttk.Button(add_row, text="Add to Queue", command=self.add_to_queue)
+        self.add_button.pack(side="left")
 
-        cookies_frame = tk.LabelFrame(self.root, text="Advanced")
-        cookies_frame.pack(fill="x", padx=14, pady=(0, 10))
+        output_frame = ttk.LabelFrame(main, text="Output")
+        output_frame.pack(fill="x", pady=(0, 10))
 
-        tk.Checkbutton(
-            cookies_frame,
-            text="Use browser cookies / logged-in session",
-            variable=self.use_browser_cookies
-        ).pack(anchor="w", padx=8, pady=(6, 2))
+        folder_row = ttk.Frame(output_frame)
+        folder_row.pack(fill="x", padx=8, pady=8)
 
-        tk.Checkbutton(
-            cookies_frame,
-            text="If yt-dlp fails, scan page for direct media URLs",
-            variable=self.scan_direct_media
-        ).pack(anchor="w", padx=8, pady=(0, 2))
+        self.output_entry = ttk.Entry(folder_row, textvariable=self.output_folder)
+        self.output_entry.pack(side="left", fill="x", expand=True)
+        ttk.Button(folder_row, text="Choose Folder", command=self.choose_folder).pack(side="left", padx=(8, 0))
 
-        browser_row = tk.Frame(cookies_frame)
-        browser_row.pack(fill="x", padx=8, pady=(0, 2))
+        advanced_row = ttk.Frame(main)
+        advanced_row.pack(fill="x", pady=(0, 10))
+        ttk.Button(
+            advanced_row,
+            text="Advanced Options",
+            command=self.open_advanced_options
+        ).pack(side="left")
+        ttk.Label(
+            advanced_row,
+            text="Auto-start, fallback scanning, audio format, cookies, and sound",
+            foreground="gray60"
+        ).pack(side="left", padx=(8, 0))
 
-        tk.Label(browser_row, text="Browser:").pack(side="left")
-        ttk.Combobox(
-            browser_row,
-            textvariable=self.browser_name,
-            values=("Firefox", "Chrome", "Safari"),
-            state="readonly",
-            width=12
-        ).pack(side="left", padx=6)
+        queue_frame = ttk.LabelFrame(main, text="Queue")
+        queue_frame.pack(fill="both", expand=True, pady=(0, 10))
 
-        tk.Label(
-            cookies_frame,
-            text="Use only for sites you're authorized to access. Cookies are not saved by this app.",
-            fg="gray60"
-        ).pack(anchor="w", padx=8, pady=(0, 8))
+        queue_table_frame = ttk.Frame(queue_frame)
+        queue_table_frame.pack(fill="both", expand=True, padx=8, pady=(8, 6))
 
-        tk.Label(self.root, text="Queue:").pack(anchor="w", padx=14)
+        columns = ("status", "type", "name", "url")
+        self.queue_list = ttk.Treeview(
+            queue_table_frame,
+            columns=columns,
+            show="headings",
+            height=8,
+            selectmode="extended"
+        )
+        self.queue_list.heading("status", text="Status")
+        self.queue_list.heading("type", text="Type")
+        self.queue_list.heading("name", text="Name")
+        self.queue_list.heading("url", text="URL")
+        self.queue_list.column("status", width=110, minwidth=90, stretch=False)
+        self.queue_list.column("type", width=80, minwidth=70, stretch=False)
+        self.queue_list.column("name", width=190, minwidth=120)
+        self.queue_list.column("url", width=420, minwidth=180)
 
-        self.queue_list = tk.Listbox(self.root, height=8)
-        self.queue_list.pack(fill="x", padx=14, pady=(2, 10))
-        self.queue_list.bind("<Double-Button-1>", self.open_selected_log)
-        self.queue_list.bind("<Return>", self.open_selected_log)
+        queue_scrollbar = ttk.Scrollbar(queue_table_frame, orient="vertical", command=self.queue_list.yview)
+        self.queue_list.configure(yscrollcommand=queue_scrollbar.set)
+        self.queue_list.pack(side="left", fill="both", expand=True)
+        queue_scrollbar.pack(side="right", fill="y")
         self.queue_list.bind("<Button-2>", self.show_queue_context_menu)
         self.queue_list.bind("<Button-3>", self.show_queue_context_menu)
+        self.queue_list.bind("<<TreeviewSelect>>", lambda event: self.update_button_states())
 
-        queue_help_row = tk.Frame(self.root)
-        queue_help_row.pack(fill="x", padx=14, pady=(0, 8))
-        tk.Label(
+        queue_help_row = ttk.Frame(queue_frame)
+        queue_help_row.pack(fill="x", padx=8, pady=(0, 8))
+        ttk.Label(
             queue_help_row,
-            text="Double-click an item to view its download log.",
-            fg="gray60"
+            text="Right-click an item for file actions and logs.",
+            foreground="gray60"
         ).pack(side="left")
-        tk.Button(queue_help_row, text="View Selected Log", command=self.open_selected_log).pack(side="right")
+        self.clear_button = ttk.Button(queue_help_row, text="Clear Queue", command=self.clear_queue)
+        self.clear_button.pack(side="right", padx=(0, 8))
+        self.remove_button = ttk.Button(queue_help_row, text="Remove Selected", command=self.remove_selected)
+        self.remove_button.pack(side="right", padx=(0, 8))
 
-        progress_row = tk.Frame(self.root)
-        progress_row.pack(fill="x", padx=14, pady=(0, 10))
-        self.progress = ttk.Progressbar(progress_row, mode="indeterminate")
-        self.progress.pack(fill="x", pady=(0, 3))
-        tk.Label(progress_row, textvariable=self.progress_status).pack(anchor="w")
+        progress_frame = ttk.LabelFrame(main, text="Progress")
+        progress_frame.pack(fill="x", pady=(0, 10))
 
-        tk.Label(self.root, text="Save location:").pack(anchor="w", padx=14)
+        progress_row = ttk.Frame(progress_frame)
+        progress_row.pack(fill="x", padx=8, pady=(8, 4))
+        self.progress = ttk.Progressbar(
+            progress_row,
+            mode="determinate",
+            maximum=100,
+            variable=self.progress_value
+        )
+        self.progress.pack(side="left", fill="x", expand=True)
+        ttk.Label(progress_row, textvariable=self.progress_percent, width=7, anchor="e").pack(side="left", padx=(8, 0))
 
-        folder_row = tk.Frame(self.root)
-        folder_row.pack(fill="x", padx=14, pady=(2, 10))
+        ttk.Label(progress_frame, textvariable=self.progress_status).pack(anchor="w", padx=8, pady=(0, 8))
 
-        tk.Entry(folder_row, textvariable=self.output_folder).pack(side="left", fill="x", expand=True)
-        tk.Button(folder_row, text="Choose Folder", command=self.choose_folder).pack(side="left", padx=6)
+        control_row = ttk.Frame(main)
+        control_row.pack(fill="x", pady=(0, 8))
 
-        control_row = tk.Frame(self.root)
-        control_row.pack(fill="x", padx=14, pady=8)
-
-        self.start_button = tk.Button(
+        self.start_button = ttk.Button(
             control_row,
             text="Start Queue",
-            height=2,
             command=self.start_queue
         )
         self.start_button.pack(side="left")
 
-        self.stop_button = tk.Button(
+        self.stop_button = ttk.Button(
             control_row,
             text="Stop After Current",
-            height=2,
             state="disabled",
             command=self.stop_queue
         )
-        self.stop_button.pack(side="left", padx=8)
+        self.stop_button.pack(side="left", padx=(8, 0))
 
-        self.cancel_button = tk.Button(
+        self.cancel_button = ttk.Button(
             control_row,
             text="Cancel Current",
-            height=2,
             state="disabled",
             command=self.cancel_current_download
         )
-        self.cancel_button.pack(side="left")
+        self.cancel_button.pack(side="left", padx=(8, 0))
 
-        footer_row = tk.Frame(self.root)
-        footer_row.pack(fill="x", padx=14)
+        footer_row = ttk.Frame(main)
+        footer_row.pack(fill="x")
 
-        tk.Label(footer_row, textvariable=self.status).pack(side="left", anchor="w")
-        tk.Checkbutton(
-            footer_row,
-            text="Ding when finished",
-            variable=self.ding_on_complete
-        ).pack(side="right")
+        ttk.Label(footer_row, textvariable=self.status).pack(side="left", anchor="w", fill="x", expand=True)
+        self.output_folder.trace_add("write", lambda *_: self.update_button_states())
+        self.update_button_states()
+
+    def add_header(self, parent):
+        header = ttk.Frame(parent)
+        header.pack(fill="x", pady=(0, 10))
+
+        title_block = ttk.Frame(header)
+        title_block.pack(side="left", anchor="w")
+
+        ttk.Label(
+            title_block,
+            text="Albus’ Archive Automaton",
+            font=("Luminari", 36)
+        ).pack(anchor="w")
+
+        ttk.Label(
+            title_block,
+            text="by gabe murray",
+            font=("Luminari", 13),
+            foreground="gray60"
+        ).pack(anchor="w", pady=(2, 0))
+
+        self.add_header_logo(header)
+
+    def add_header_logo(self, parent):
+        logo_path = Path(__file__).resolve().parent / "Assets" / "Albutron_mirrored.png"
+        if not logo_path.exists():
+            return
+
+        try:
+            original_logo = tk.PhotoImage(file=str(logo_path))
+            scale = max(
+                1,
+                (original_logo.width() + 219) // 220,
+                (original_logo.height() + 79) // 80
+            )
+            self.logo_image = original_logo.subsample(scale, scale)
+            ttk.Label(parent, image=self.logo_image).pack(side="right", anchor="e")
+        except tk.TclError:
+            self.logo_image = None
 
     def choose_folder(self):
         folder = filedialog.askdirectory(title="Choose save location")
         if folder:
             self.output_folder.set(folder)
-            if self.items and not self.running and self.current_index < len(self.items):
+            self.update_button_states()
+            if self.auto_start.get() and self.items and not self.running and self.current_index < len(self.items):
                 self.start_queue()
+
+    def open_advanced_options(self):
+        if self.advanced_window is not None and self.advanced_window.winfo_exists():
+            self.advanced_window.lift()
+            self.advanced_window.focus_set()
+            return
+
+        window = tk.Toplevel(self.root)
+        window.title("Advanced Options")
+        window.resizable(False, False)
+        window.transient(self.root)
+        window.protocol("WM_DELETE_WINDOW", self.close_advanced_options)
+        self.advanced_window = window
+
+        body = ttk.Frame(window, padding=14)
+        body.pack(fill="both", expand=True)
+
+        ttk.Checkbutton(
+            body,
+            text="Start automatically when a save location is ready",
+            variable=self.auto_start,
+            command=self.update_button_states
+        ).pack(anchor="w", pady=(0, 6))
+
+        ttk.Checkbutton(
+            body,
+            text="If yt-dlp fails, scan page for direct media URLs",
+            variable=self.scan_direct_media
+        ).pack(anchor="w", pady=(0, 6))
+
+        ttk.Checkbutton(
+            body,
+            text="Save Audio Only as WAV",
+            variable=self.audio_lossless_wav
+        ).pack(anchor="w", pady=(0, 6))
+
+        ttk.Checkbutton(
+            body,
+            text="Use browser cookies / logged-in session",
+            variable=self.use_browser_cookies,
+            command=self.update_browser_state
+        ).pack(anchor="w", pady=(0, 6))
+
+        browser_row = ttk.Frame(body)
+        browser_row.pack(fill="x", pady=(0, 6))
+
+        ttk.Label(browser_row, text="Browser:").pack(side="left")
+        self.browser_combo = ttk.Combobox(
+            browser_row,
+            textvariable=self.browser_name,
+            values=("Firefox", "Chrome", "Safari"),
+            state="readonly",
+            width=12
+        )
+        self.browser_combo.pack(side="left", padx=(6, 0))
+
+        ttk.Label(
+            body,
+            text="Use only for sites you're authorized to access. Cookies are not saved by this app.",
+            foreground="gray60",
+            wraplength=420
+        ).pack(anchor="w", pady=(0, 10))
+
+        ttk.Checkbutton(
+            body,
+            text="Ding when finished",
+            variable=self.ding_on_complete
+        ).pack(anchor="w")
+
+        button_row = ttk.Frame(body)
+        button_row.pack(fill="x", pady=(14, 0))
+        ttk.Button(button_row, text="Done", command=self.close_advanced_options).pack(side="right")
+
+        self.update_browser_state()
+        window.update_idletasks()
+        self.center_child_window(window)
+
+    def close_advanced_options(self):
+        if self.advanced_window is not None and self.advanced_window.winfo_exists():
+            self.advanced_window.destroy()
+        self.advanced_window = None
+        self.browser_combo = None
+
+    def center_child_window(self, window):
+        self.root.update_idletasks()
+        window.update_idletasks()
+
+        parent_x = self.root.winfo_rootx()
+        parent_y = self.root.winfo_rooty()
+        parent_width = self.root.winfo_width()
+        parent_height = self.root.winfo_height()
+        width = window.winfo_width()
+        height = window.winfo_height()
+
+        x = parent_x + max(0, (parent_width - width) // 2)
+        y = parent_y + max(0, (parent_height - height) // 3)
+        window.geometry(f"+{x}+{y}")
+
+    def update_browser_state(self):
+        if self.browser_combo is None:
+            return
+
+        try:
+            if self.use_browser_cookies.get():
+                self.browser_combo.config(state="readonly")
+            else:
+                self.browser_combo.config(state="disabled")
+        except tk.TclError:
+            self.browser_combo = None
+
+    def update_button_states(self):
+        selected = self.selected_queue_indices()
+        can_start = (
+            bool(self.items)
+            and bool(self.output_folder.get().strip())
+            and not self.running
+            and self.current_index < len(self.items)
+        )
+
+        if hasattr(self, "start_button"):
+            self.start_button.config(state="normal" if can_start else "disabled")
+        if hasattr(self, "stop_button"):
+            self.stop_button.config(state="normal" if self.running else "disabled")
+        if hasattr(self, "cancel_button"):
+            self.cancel_button.config(
+                state="normal" if self.running and self.active_log_item is not None else "disabled"
+            )
+        if hasattr(self, "remove_button"):
+            self.remove_button.config(state="normal" if selected else "disabled")
+        if hasattr(self, "clear_button"):
+            self.clear_button.config(state="normal" if self.items and not self.running else "disabled")
 
     def selected_cookies_browser(self):
         if not self.use_browser_cookies.get():
@@ -345,13 +548,16 @@ class QueuedMediaDownloader:
 
         if self.running:
             self.status.set(f"Added to queue. {len(self.items)} item(s) total.")
-        elif self.output_folder.get().strip():
+        elif self.auto_start.get() and self.output_folder.get().strip():
             self.start_queue()
+        elif self.output_folder.get().strip():
+            self.status.set("Added to queue. Press Start Queue when ready.")
         else:
             self.status.set("Added to queue. Choose a save location to start downloading.")
+        self.update_button_states()
 
     def remove_selected(self):
-        selected = list(self.queue_list.curselection())
+        selected = self.selected_queue_indices()
 
         if self.running:
             removable = [
@@ -375,12 +581,14 @@ class QueuedMediaDownloader:
                 self.status.set("Removed queued item(s). Active or finished items were left in the queue.")
             else:
                 self.status.set("Removed queued item(s).")
+            self.update_button_states()
             return
 
         for index in reversed(selected):
             del self.items[index]
 
         self.refresh_queue_list()
+        self.update_button_states()
 
     def clear_queue(self):
         if self.running:
@@ -393,17 +601,46 @@ class QueuedMediaDownloader:
         self.items.clear()
         self.current_index = 0
         self.refresh_queue_list()
+        self.update_button_states()
 
     def refresh_queue_list(self):
-        self.queue_list.delete(0, "end")
+        children = self.queue_list.get_children()
+        if children:
+            self.queue_list.delete(*children)
 
-        for i, item in enumerate(self.items, start=1):
+        for index, item in enumerate(self.items):
             display_name = item["name"] if item["name"] else "(use media title)"
-            mode = item.get("mode", "video").title()
+            mode = self.media_mode_label(item.get("mode", "video"))
             self.queue_list.insert(
+                "",
                 "end",
-                f"{i}. [{item['status']}] [{mode}] {display_name} - {item['url']}"
+                iid=str(index),
+                values=(item["status"], mode, display_name, item["url"])
             )
+        self.update_button_states()
+
+    def selected_queue_indices(self):
+        if not hasattr(self, "queue_list"):
+            return []
+
+        indices = []
+        for item_id in self.queue_list.selection():
+            try:
+                index = int(item_id)
+            except ValueError:
+                continue
+            if 0 <= index < len(self.items):
+                indices.append(index)
+
+        return sorted(indices)
+
+    def media_mode_label(self, mode):
+        labels = {
+            "video": "Video",
+            "audio": "Audio Only",
+            "images": "Images",
+        }
+        return labels.get(mode, str(mode).title())
 
     def start_queue(self):
         folder = self.output_folder.get().strip()
@@ -432,7 +669,8 @@ class QueuedMediaDownloader:
         self.stop_button.config(state="normal")
         self.cancel_button.config(state="normal")
         self.progress_status.set("Starting queue...")
-        self.progress.start()
+        self.progress_value.set(0)
+        self.progress_percent.set("0%")
 
         thread = threading.Thread(target=self.run_queue, daemon=True)
         thread.start()
@@ -472,11 +710,12 @@ class QueuedMediaDownloader:
                 self.safe_refresh()
                 self.safe_status(f"Downloading {self.current_index + 1} of {len(self.items)}")
                 self.safe_progress_status(f"Downloading item {self.current_index + 1} of {len(self.items)}")
+                self.safe_progress_value(0)
 
                 self.log_message("")
                 self.log_message("=" * 70)
                 self.log_message(f"Starting item {self.current_index + 1} of {len(self.items)}")
-                self.log_message(f"Mode: {item.get('mode', 'video').title()}")
+                self.log_message(f"Mode: {self.media_mode_label(item.get('mode', 'video'))}")
                 self.log_message(item["url"])
                 if item["name"]:
                     self.log_message(f"Save as: {item['name']}")
@@ -512,8 +751,13 @@ class QueuedMediaDownloader:
                     self.log_message("Item canceled. Partial output was removed.")
                     self.safe_status("Canceled current item.")
                     self.safe_progress_status("Canceled current item")
+                    self.safe_progress_value(0)
                 else:
                     item["status"] = "Done" if success else "Failed"
+                    if success:
+                        self.safe_progress_value(100)
+                    else:
+                        self.safe_progress_value(0)
                 if not success and not item.get("failure_detail"):
                     item["failure_detail"] = self.last_error_from_log(item)
                 self.safe_refresh()
@@ -524,6 +768,7 @@ class QueuedMediaDownloader:
                 if self.stop_after_current:
                     self.safe_status("Stopped after current item.")
                     self.safe_progress_status("Stopped")
+                    self.safe_progress_value(0)
                     break
 
             if self.current_index >= len(self.items):
@@ -534,22 +779,52 @@ class QueuedMediaDownloader:
         except Exception as e:
             self.safe_status("Error.")
             self.safe_progress_status("Error")
+            self.safe_progress_value(0)
             self.log_message(str(e))
 
         finally:
             self.active_log_item = None
             self.running = False
             self.stop_after_current = False
-            self.root.after(0, lambda: self.progress.stop())
             self.root.after(0, lambda: self.start_button.config(state="normal"))
             self.root.after(0, lambda: self.stop_button.config(state="disabled"))
             self.root.after(0, lambda: self.cancel_button.config(state="disabled"))
+            self.root.after(0, self.update_button_states)
 
     def download_one(self, url, folder, custom_name, mode="video", cookies_browser=None, scan_direct_media=True):
         if mode == "images":
             return self.download_images(url, folder, custom_name, cookies_browser)
+        if mode == "audio":
+            return self.download_audio(url, folder, custom_name, cookies_browser, allow_discovery=scan_direct_media)
 
         return self.download_video(url, folder, custom_name, cookies_browser, allow_discovery=scan_direct_media)
+
+    def download_audio(self, url, folder, custom_name, cookies_browser=None, allow_discovery=True):
+        ffmpeg_path = self.get_ffmpeg_path()
+
+        self.log_message(f"Using ffmpeg:")
+        self.log_message(ffmpeg_path)
+        if cookies_browser:
+            self.log_message(f"Using browser cookies from: {cookies_browser.title()}")
+        self.log_message("")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_dir = Path(temp_dir)
+            audio_file = self.download_best_audio(url, temp_dir, ffmpeg_path, cookies_browser)
+            if self.cancel_current:
+                return False
+
+            if not audio_file:
+                self.log_message("Audio download failed.")
+                if allow_discovery and not self.is_direct_media_url(url):
+                    return self.try_discovered_direct_media(url, folder, custom_name, cookies_browser, mode="audio")
+                return False
+
+            final_path = self.final_audio_output_path(folder, audio_file, custom_name)
+            shutil.move(str(audio_file), str(final_path))
+            self.log_message("")
+            self.log_message(f"Saved audio to: {final_path}")
+            return [final_path]
 
     def download_video(self, url, folder, custom_name, cookies_browser=None, allow_discovery=True):
         ffmpeg_path = self.get_ffmpeg_path()
@@ -588,7 +863,7 @@ class QueuedMediaDownloader:
             if not best_file:
                 self.log_message("Best-source download failed.")
                 if allow_discovery and not self.is_direct_media_url(url):
-                    return self.try_discovered_direct_media(url, folder, custom_name, cookies_browser)
+                    return self.try_discovered_direct_media(url, folder, custom_name, cookies_browser, mode="video")
                 return False
 
             final_path = self.final_output_path(folder, best_file, custom_name)
@@ -602,14 +877,14 @@ class QueuedMediaDownloader:
 
             return self.convert_to_compatible_mp4(best_file, final_path, ffmpeg_path)
 
-    def try_discovered_direct_media(self, page_url, folder, custom_name, cookies_browser=None):
+    def try_discovered_direct_media(self, page_url, folder, custom_name, cookies_browser=None, mode="video"):
         self.log_message("")
         self.log_message("yt-dlp failed. Scanning this page once for direct media URLs...")
         self.safe_progress_status("Scanning page for direct media URLs...")
         if cookies_browser:
             self.log_message("Browser cookies apply only to yt-dlp for now; the page scanner will not read browser cookies.")
 
-        candidates = self.discover_direct_media_urls(page_url)
+        candidates = self.discover_direct_media_urls(page_url, mode=mode)
         self.log_message(f"Found {len(candidates)} candidate direct media URL(s).")
 
         for index, candidate in enumerate(candidates, start=1):
@@ -625,7 +900,10 @@ class QueuedMediaDownloader:
             if self.cancel_current:
                 return False
 
-            saved_paths = self.download_video(candidate, folder, custom_name, cookies_browser, allow_discovery=False)
+            if mode == "audio":
+                saved_paths = self.download_audio(candidate, folder, custom_name, cookies_browser, allow_discovery=False)
+            else:
+                saved_paths = self.download_video(candidate, folder, custom_name, cookies_browser, allow_discovery=False)
             if saved_paths:
                 self.log_message("")
                 self.log_message("Downloaded using discovered direct media URL.")
@@ -636,7 +914,7 @@ class QueuedMediaDownloader:
 
         return False
 
-    def discover_direct_media_urls(self, page_url):
+    def discover_direct_media_urls(self, page_url, mode="video"):
         # Conservative fallback: fetch only the original pasted page once and
         # inspect that response for direct media URLs. This intentionally does
         # not crawl, execute JavaScript, or follow links to other pages.
@@ -666,8 +944,8 @@ class QueuedMediaDownloader:
         encoding = content_type or "utf-8"
         text = raw.decode(encoding, errors="replace")
         title = self.extract_page_title(text)
-        candidates = self.extract_media_urls_from_text(text, base_url=page_url)
-        return self.rank_media_candidates(candidates, page_url=page_url, page_title=title)
+        candidates = self.extract_media_urls_from_text(text, base_url=page_url, mode=mode)
+        return self.rank_media_candidates(candidates, page_url=page_url, page_title=title, mode=mode)
 
     def page_scan_ssl_context(self):
         try:
@@ -680,8 +958,11 @@ class QueuedMediaDownloader:
         reason = getattr(error, "reason", error)
         return isinstance(reason, ssl.SSLCertVerificationError)
 
-    def extract_media_urls_from_text(self, text, base_url=None):
-        media_extensions = r"(?:mp4|m3u8|mpd|mov|webm)"
+    def extract_media_urls_from_text(self, text, base_url=None, mode="video"):
+        media_extensions = "(?:" + "|".join(
+            extension.lstrip(".")
+            for extension in self.direct_media_extensions(mode)
+        ) + ")"
         seen = set()
         candidates = []
 
@@ -714,14 +995,14 @@ class QueuedMediaDownloader:
 
         for variant in normalized_variants:
             for match in absolute_pattern.finditer(variant):
-                self.add_media_candidate(candidates, seen, match.group(0), base_url)
+                self.add_media_candidate(candidates, seen, match.group(0), base_url, mode=mode)
 
             for match in relative_pattern.finditer(variant):
-                self.add_media_candidate(candidates, seen, match.group(1), base_url)
+                self.add_media_candidate(candidates, seen, match.group(1), base_url, mode=mode)
 
         return candidates
 
-    def add_media_candidate(self, candidates, seen, url, base_url=None):
+    def add_media_candidate(self, candidates, seen, url, base_url=None, mode="video"):
         url = self.clean_media_url(url)
         if base_url:
             url = urljoin(base_url, url)
@@ -730,7 +1011,7 @@ class QueuedMediaDownloader:
         if parsed.scheme not in {"http", "https"}:
             return
 
-        if not self.is_direct_media_url(url):
+        if not self.is_direct_media_url(url, mode=mode):
             return
 
         key = url
@@ -752,7 +1033,7 @@ class QueuedMediaDownloader:
 
         return url
 
-    def rank_media_candidates(self, candidates, page_url=None, page_title=None):
+    def rank_media_candidates(self, candidates, page_url=None, page_title=None, mode="video"):
         keywords = self.page_keywords(page_url, page_title)
 
         def score(candidate):
@@ -761,13 +1042,30 @@ class QueuedMediaDownloader:
             full_url = candidate.lower()
             extension = self.media_url_extension(candidate)
 
-            type_rank = {
-                ".mp4": 0,
-                ".m3u8": 1,
-                ".mpd": 2,
-                ".mov": 3,
-                ".webm": 3,
-            }.get(extension, 9)
+            if mode == "audio":
+                type_rank = {
+                    ".m4a": 0,
+                    ".mp3": 1,
+                    ".aac": 2,
+                    ".flac": 3,
+                    ".wav": 4,
+                    ".ogg": 5,
+                    ".oga": 5,
+                    ".opus": 6,
+                    ".mp4": 7,
+                    ".m3u8": 8,
+                    ".mpd": 9,
+                    ".mov": 10,
+                    ".webm": 10,
+                }.get(extension, 99)
+            else:
+                type_rank = {
+                    ".mp4": 0,
+                    ".m3u8": 1,
+                    ".mpd": 2,
+                    ".mov": 3,
+                    ".webm": 3,
+                }.get(extension, 9)
 
             tracker_words = ("ad", "ads", "doubleclick", "googleads", "tracking", "beacon", "analytics", "preroll")
             tracker_penalty = 10 if any(word in full_url for word in tracker_words) else 0
@@ -795,16 +1093,27 @@ class QueuedMediaDownloader:
         title = re.sub(r"\s+", " ", match.group(1))
         return html.unescape(title).strip()
 
-    def is_direct_media_url(self, url):
-        return self.media_url_extension(url) in {".mp4", ".m3u8", ".mpd", ".mov", ".webm"}
+    def is_direct_media_url(self, url, mode="any"):
+        return self.media_url_extension(url) in self.direct_media_extensions(mode)
 
     def media_url_extension(self, url):
         path = urlparse(url).path.lower()
-        for extension in (".mp4", ".m3u8", ".mpd", ".mov", ".webm"):
+        for extension in self.direct_media_extensions("any"):
             if path.endswith(extension):
                 return extension
 
         return ""
+
+    def direct_media_extensions(self, mode="any"):
+        video_extensions = (".mp4", ".m3u8", ".mpd", ".mov", ".webm")
+        audio_extensions = (".m4a", ".mp3", ".aac", ".flac", ".wav", ".ogg", ".oga", ".opus")
+
+        if mode == "video":
+            return video_extensions
+        if mode == "audio":
+            return audio_extensions + video_extensions
+
+        return audio_extensions + video_extensions
 
     def download_images(self, url, folder, custom_name, cookies_browser=None):
         self.log_message("Using gallery-dl for image download.")
@@ -829,7 +1138,7 @@ class QueuedMediaDownloader:
             if returncode != 0:
                 self.log_message(f"gallery-dl exited with code {returncode}.")
                 self.log_message("If gallery-dl is not installed, run: python3 -m pip install gallery-dl")
-                self.log_message("Double-click this queue item to review the full gallery-dl diagnostics.")
+                self.log_message("Right-click this queue item and choose View Log to review the full gallery-dl diagnostics.")
 
             image_files = self.find_downloaded_images(temp_dir)
             if not image_files:
@@ -973,11 +1282,64 @@ class QueuedMediaDownloader:
 
         return max(files, key=lambda p: p.stat().st_size)
 
+    def download_best_audio(self, url, temp_dir, ffmpeg_path, cookies_browser=None):
+        output_template = str(temp_dir / "%(title).180B [%(id)s].audio.%(ext)s")
+        audio_format = self.selected_audio_format()
+        audio_quality = self.selected_audio_quality(audio_format)
+
+        command = [
+            "python3",
+            "-m",
+            "yt_dlp",
+
+            # Prefer the source's best audio stream, or fall back to best media
+            # so video-only/direct-media links can still produce audio.
+            "-f", "ba/bestaudio/best",
+            "--extract-audio",
+            "--audio-format", audio_format,
+            "--audio-quality", audio_quality,
+            "--ffmpeg-location", ffmpeg_path,
+            "--no-playlist",
+            "-o", output_template,
+        ]
+
+        command = self.add_cookie_options(command, cookies_browser)
+        command.append(url)
+
+        self.log_message("Downloading best available audio...")
+        self.safe_progress_status("Downloading audio...")
+        returncode = self.run_command_live(command, progress_label="Downloading audio")
+
+        if returncode != 0:
+            self.log_message(f"Audio download exited with code {returncode}.")
+
+        files = [
+            p for p in temp_dir.iterdir()
+            if p.is_file() and p.suffix.lower() in self.audio_file_extensions()
+        ]
+
+        if not files:
+            return None
+
+        return max(files, key=lambda p: p.stat().st_size)
+
     def add_cookie_options(self, command, cookies_browser):
         if cookies_browser:
             command.extend(["--cookies-from-browser", cookies_browser])
 
         return command
+
+    def audio_file_extensions(self):
+        return {".m4a", ".mp3", ".aac", ".flac", ".wav", ".ogg", ".oga", ".opus"}
+
+    def selected_audio_format(self):
+        return "wav" if self.audio_lossless_wav.get() else "mp3"
+
+    def selected_audio_quality(self, audio_format):
+        if audio_format == "wav":
+            return "0"
+
+        return "320K"
 
     def convert_to_compatible_mp4(self, source_file, final_path, ffmpeg_path):
         temp_output = final_path.with_suffix(".tmp.mp4")
@@ -1074,21 +1436,45 @@ class QueuedMediaDownloader:
         if not self.ding_on_complete.get():
             return
 
-        sound_path = Path("/System/Library/Sounds/Glass.aiff")
-        try:
+        self.play_completion_sound()
+
+    def play_completion_sound(self):
+        sound_path = self.completion_sound_path()
+        afplay = shutil.which("afplay")
+        if not sound_path or not afplay:
+            self.ring_system_bell()
+            return
+
+        threading.Thread(
+            target=self.play_sound_file,
+            args=(afplay, sound_path),
+            daemon=True
+        ).start()
+
+    def completion_sound_path(self):
+        for sound_name in self.COMPLETION_SOUND_NAMES:
+            sound_path = self.SYSTEM_SOUND_DIR / sound_name
             if sound_path.exists():
-                subprocess.Popen(
-                    ["afplay", str(sound_path)],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL
-                )
-            else:
-                self.root.bell()
+                return sound_path
+
+        return None
+
+    def play_sound_file(self, afplay, sound_path):
+        try:
+            subprocess.run(
+                [afplay, "-v", str(self.COMPLETION_SOUND_VOLUME), str(sound_path)],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
         except Exception:
-            try:
-                self.root.bell()
-            except Exception:
-                pass
+            self.ring_system_bell()
+
+    def ring_system_bell(self):
+        try:
+            self.root.after(0, self.root.bell)
+        except Exception:
+            pass
 
     def run_command_live(self, command, compact_ffmpeg=False, progress_label=None, source_duration=None):
         self.log_message(" ".join(command))
@@ -1287,6 +1673,19 @@ class QueuedMediaDownloader:
 
         return self.get_unique_output_path(folder, stem, ".mp4")
 
+    def final_audio_output_path(self, folder, source_file, custom_name):
+        if custom_name:
+            stem = self.safe_filename(custom_name)
+        else:
+            stem = self.safe_filename(source_file.stem)
+            stem = re.sub(r"\s*\[[^\]]+\]\.audio$", "", stem)
+            stem = re.sub(r"\.audio$", "", stem)
+
+            if stem in ["audio", "bestaudio", "best_audio"]:
+                stem = "downloaded_audio"
+
+        return self.get_unique_output_path(folder, stem, f".{self.selected_audio_format()}")
+
     def final_image_output_path(self, folder, source_file, custom_name, base_name, sequence_number=None):
         if sequence_number is None:
             if custom_name:
@@ -1357,25 +1756,21 @@ class QueuedMediaDownloader:
 
         return "Download failed. Open the item log for details."
 
-    def open_selected_log(self, event=None):
-        selected = list(self.queue_list.curselection())
-        if not selected:
-            return
-
-        index = selected[0]
-        if index < 0 or index >= len(self.items):
-            return
-
-        self.open_item_log(index)
-
     def show_queue_context_menu(self, event):
-        index = self.queue_list.nearest(event.y)
+        item_id = self.queue_list.identify_row(event.y)
+        if not item_id:
+            return
+
+        try:
+            index = int(item_id)
+        except ValueError:
+            return
+
         if index < 0 or index >= len(self.items):
             return
 
-        self.queue_list.selection_clear(0, "end")
-        self.queue_list.selection_set(index)
-        self.queue_list.activate(index)
+        self.queue_list.selection_set(item_id)
+        self.queue_list.focus(item_id)
 
         item = self.items[index]
         saved_paths = self.existing_saved_paths(item)
@@ -1434,6 +1829,8 @@ class QueuedMediaDownloader:
         self.use_browser_cookies.set(bool(cookies_browser))
         if cookies_browser:
             self.browser_name.set(cookies_browser.title())
+        self.update_browser_state()
+        self.update_button_states()
 
         self.reset_entry_undo_history(self.url_entry, self.url)
         self.reset_entry_undo_history(self.name_entry, self.custom_name)
@@ -1533,7 +1930,7 @@ class QueuedMediaDownloader:
         header = tk.Frame(window)
         header.pack(fill="x", padx=10, pady=(10, 6))
 
-        mode = item.get("mode", "video").title()
+        mode = self.media_mode_label(item.get("mode", "video"))
         tk.Label(
             header,
             text=f"Item {index + 1} - {mode} - {item.get('status', 'Unknown')}",
@@ -1574,6 +1971,9 @@ class QueuedMediaDownloader:
     def safe_progress_status(self, message):
         self.log_queue.put(("progress_status", message))
 
+    def safe_progress_value(self, value):
+        self.log_queue.put(("progress_value", value))
+
     def safe_refresh(self):
         self.log_queue.put(("refresh", None))
 
@@ -1588,6 +1988,11 @@ class QueuedMediaDownloader:
                     self.status.set(value)
                 elif kind == "progress_status":
                     self.progress_status.set(value)
+                    percent = self.progress_percent_from_status(value)
+                    if percent is not None:
+                        self.set_progress_value(percent)
+                elif kind == "progress_value":
+                    self.set_progress_value(value)
                 elif kind == "refresh":
                     self.refresh_queue_list()
 
@@ -1595,6 +2000,21 @@ class QueuedMediaDownloader:
             pass
 
         self.root.after(100, self.process_log_queue)
+
+    def progress_percent_from_status(self, message):
+        percent = re.search(r"(\d+(?:\.\d+)?)%", message)
+        if not percent:
+            return None
+
+        return min(100, max(0, float(percent.group(1))))
+
+    def set_progress_value(self, value):
+        percent = min(100, max(0, float(value)))
+        self.progress_value.set(percent)
+        if percent.is_integer():
+            self.progress_percent.set(f"{percent:.0f}%")
+        else:
+            self.progress_percent.set(f"{percent:.1f}%")
 
 
 if __name__ == "__main__":
