@@ -1,6 +1,6 @@
-# Archival Media Downloader
+# Albus' Archive Automaton
 
-A simple macOS desktop app for downloading video or image media from URLs. It uses a Tkinter interface and can queue multiple downloads, optionally use browser cookies, and fall back to scanning a page for direct media links.
+A simple macOS desktop app for downloading video, audio, or image media from URLs. It uses a Tkinter interface and can queue multiple downloads, optionally use browser cookies, and fall back to scanning a page for direct media links.
 
 ## Requirements
 
@@ -24,13 +24,13 @@ These commands install the Homebrew packages and Python dependencies needed to r
 Open the launcher file in this folder:
 
 ```text
-Open_Archival_Media_Downloader.command
+Open_Albus_Archive_Automaton.command
 ```
 
 If macOS shows a warning and blocks it, right-click the file, choose Open, and confirm. This is normal for unsigned scripts. If needed, you can also clear the quarantine flag once in Terminal:
 
 ```bash
-xattr -dr com.apple.quarantine Open_Archival_Media_Downloader.command
+xattr -dr com.apple.quarantine Open_Albus_Archive_Automaton.command
 ```
 
 ## How to use it
@@ -38,7 +38,7 @@ xattr -dr com.apple.quarantine Open_Archival_Media_Downloader.command
 1. Choose a save folder.
 2. Paste one or more media URLs into the queue.
 3. Optionally enter a custom file name without an extension.
-4. Choose Video or Images mode.
+4. Choose Video, Audio Only, or Images mode.
 5. Click Add to Queue, then Start Queue.
 
 ## Notes

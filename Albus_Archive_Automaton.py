@@ -1,4 +1,11 @@
+"""Tkinter desktop app for queueing and downloading archival media.
+
+The app is intentionally self-contained: Tkinter owns the UI, yt-dlp/gallery-dl
+handle site-specific downloads, and ffmpeg handles media compatibility work.
+"""
+
 import os
+import json
 import queue
 import re
 import shutil
@@ -18,16 +25,59 @@ from urllib.parse import unquote, urljoin, urlparse
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
+try:
+    from PIL import Image, ImageTk
+except ImportError:
+    Image = None
+    ImageTk = None
+
 
 class QueuedMediaDownloader:
+    """Queue-driven media downloader with video, audio-only, and image modes."""
+
+    WINDOW_TITLE = "Albus’ Archive Automaton"
+    WINDOW_GEOMETRY = "860x940"
+    MIN_WINDOW_SIZE = (760, 700)
+
+    HEADER_TITLE = "Albus’ Archive Automaton"
+    HEADER_BYLINE = "by gabe murray"
+    HEADER_INSTRUCTIONS = "Copy in a URL, pick a save location, and then start the queue!"
+    HEADER_BACKGROUND_FILE = Path("Assets") / "Albus Background.png"
+    HEADER_HEIGHT = 166
+    HEADER_BACKGROUND_OVERSCAN = 1.0
+    HEADER_BACKGROUND_FOCUS_X = 0.68
+    HEADER_BACKGROUND_FOCUS_Y = 0.58
+    HEADER_BACKGROUND_FIT_MODE = "cover"
+    APP_BACKGROUND_COLOR = "#0a1724"
+    PANEL_BACKGROUND_COLOR = "#2d4352"
+    FIELD_BACKGROUND_COLOR = "#203443"
+    PANEL_TEXT_COLOR = "#e8edf1"
+    PANEL_MUTED_TEXT_COLOR = "#c1cad2"
+    PANEL_TITLE_COLOR = "#f2eadc"
+    PANEL_BORDER_COLOR = "#607685"
+    BUTTON_BACKGROUND_COLOR = "#5c6675"
+    BUTTON_ACTIVE_BACKGROUND_COLOR = "#6d7a8c"
+    BUTTON_TEXT_COLOR = APP_BACKGROUND_COLOR
+    PROGRESS_TRACK_COLOR = "#203443"
+    PROGRESS_FILL_COLOR = "#7f9fb4"
+    SECTION_TITLE_FONT = ("Luminari", 16)
+    BUTTON_FONT = ("Luminari", 13)
+    APP_STATE_FILE = Path(".albus_archive_automaton_state.json")
+    QUEUE_DONE_ROW_COLORS = {"background": "#263f32", "foreground": "#ecf4ee"}
+    QUEUE_FAILED_ROW_COLORS = {"background": "#523030", "foreground": "#f7eeee"}
+
     SYSTEM_SOUND_DIR = Path("/System/Library/Sounds")
     COMPLETION_SOUND_NAMES = ("Blow.aiff", "Glass.aiff")
     COMPLETION_SOUND_VOLUME = 0.6
 
+    VIDEO_EXTENSIONS = (".mp4", ".m3u8", ".mpd", ".mov", ".webm")
+    AUDIO_EXTENSIONS = (".m4a", ".mp3", ".aac", ".flac", ".wav", ".ogg", ".oga", ".opus")
+    IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tif", ".tiff", ".avif")
+
     def __init__(self, root):
         self.root = root
-        self.root.title("Archival Media Downloader")
-        self.root.geometry("860x900")
+        self.root.title(self.WINDOW_TITLE)
+        self.root.geometry(self.WINDOW_GEOMETRY)
 
         self.url = tk.StringVar()
         self.custom_name = tk.StringVar()
@@ -35,11 +85,11 @@ class QueuedMediaDownloader:
         self.output_folder = tk.StringVar()
         self.use_browser_cookies = tk.BooleanVar(value=False)
         self.scan_direct_media = tk.BooleanVar(value=True)
-        self.auto_start = tk.BooleanVar(value=True)
+        self.auto_start = tk.BooleanVar(value=False)
         self.audio_lossless_wav = tk.BooleanVar(value=False)
         self.browser_name = tk.StringVar(value="Firefox")
         self.ding_on_complete = tk.BooleanVar(value=True)
-        self.status = tk.StringVar(value="Choose a save folder, then add media URLs to the queue.")
+        self.status = tk.StringVar(value="")
         self.progress_status = tk.StringVar(value="Idle")
         self.progress_value = tk.DoubleVar(value=0)
         self.progress_percent = tk.StringVar(value="")
@@ -57,88 +107,93 @@ class QueuedMediaDownloader:
         self.advanced_window = None
         self.browser_combo = None
         self.logo_image = None
+        self.header_canvas = None
+        self.header_background_source = None
+        self.header_background_image = None
+        self.header_background_render_key = None
 
+        self.load_app_state()
         self.build_ui()
+        self.root.protocol("WM_DELETE_WINDOW", self.on_app_close)
         self.root.after(100, self.process_log_queue)
 
-    def build_ui(self):
-        self.root.minsize(760, 640)
+    # UI construction -----------------------------------------------------
 
-        main = ttk.Frame(self.root, padding=14)
+    def build_ui(self):
+        self.root.minsize(*self.MIN_WINDOW_SIZE)
+        self.configure_styles()
+        self.root.configure(background=self.APP_BACKGROUND_COLOR)
+
+        app_body = tk.Frame(self.root, background=self.APP_BACKGROUND_COLOR)
+        app_body.pack(fill="both", expand=True)
+
+        self.add_header(app_body)
+
+        main = tk.Frame(app_body, background=self.APP_BACKGROUND_COLOR, padx=14, pady=0)
         main.pack(fill="both", expand=True)
 
-        self.add_header(main)
+        source_frame = self.create_section(main, "Source", fill="x", pady=(0, 10))
 
-        source_frame = ttk.LabelFrame(main, text="Source")
-        source_frame.pack(fill="x", pady=(0, 10))
-
-        mode_row = ttk.Frame(source_frame)
+        mode_row = self.create_panel_row(source_frame)
         mode_row.pack(fill="x", padx=8, pady=(8, 6))
 
-        ttk.Radiobutton(
+        tk.Radiobutton(
             mode_row,
             text="Video",
             variable=self.media_mode,
-            value="video"
+            value="video",
+            **self.panel_radio_options()
         ).pack(side="left")
 
-        ttk.Radiobutton(
+        tk.Radiobutton(
             mode_row,
             text="Audio Only",
             variable=self.media_mode,
-            value="audio"
+            value="audio",
+            **self.panel_radio_options()
         ).pack(side="left", padx=(12, 0))
 
-        ttk.Radiobutton(
+        tk.Radiobutton(
             mode_row,
             text="Images",
             variable=self.media_mode,
-            value="images"
+            value="images",
+            **self.panel_radio_options()
         ).pack(side="left", padx=(12, 0))
 
-        ttk.Label(source_frame, text="Media URL:").pack(anchor="w", padx=8)
-        self.url_entry = ttk.Entry(source_frame, textvariable=self.url)
+        self.create_panel_label(source_frame, "Media URL:").pack(anchor="w", padx=8)
+        self.url_entry = self.create_panel_entry(source_frame, self.url)
         self.url_entry.pack(fill="x", padx=8, pady=(2, 8))
 
-        ttk.Label(source_frame, text="Save as, optional - no extension needed:").pack(anchor="w", padx=8)
-        self.name_entry = ttk.Entry(source_frame, textvariable=self.custom_name)
+        self.create_panel_label(source_frame, "Save as, optional - no extension needed:").pack(anchor="w", padx=8)
+        self.name_entry = self.create_panel_entry(source_frame, self.custom_name)
         self.name_entry.pack(fill="x", padx=8, pady=(2, 8))
         self.setup_entry_undo(self.url_entry, self.url)
         self.setup_entry_undo(self.name_entry, self.custom_name)
 
-        add_row = ttk.Frame(source_frame)
+        add_row = self.create_panel_row(source_frame)
         add_row.pack(fill="x", padx=8, pady=(0, 8))
 
-        self.add_button = ttk.Button(add_row, text="Add to Queue", command=self.add_to_queue)
+        self.add_button = self.create_action_button(add_row, text="Add to Queue", command=self.add_to_queue)
         self.add_button.pack(side="left")
-
-        output_frame = ttk.LabelFrame(main, text="Output")
-        output_frame.pack(fill="x", pady=(0, 10))
-
-        folder_row = ttk.Frame(output_frame)
-        folder_row.pack(fill="x", padx=8, pady=8)
-
-        self.output_entry = ttk.Entry(folder_row, textvariable=self.output_folder)
-        self.output_entry.pack(side="left", fill="x", expand=True)
-        ttk.Button(folder_row, text="Choose Folder", command=self.choose_folder).pack(side="left", padx=(8, 0))
-
-        advanced_row = ttk.Frame(main)
-        advanced_row.pack(fill="x", pady=(0, 10))
-        ttk.Button(
-            advanced_row,
+        self.create_action_button(
+            add_row,
             text="Advanced Options",
             command=self.open_advanced_options
-        ).pack(side="left")
-        ttk.Label(
-            advanced_row,
-            text="Auto-start, fallback scanning, audio format, cookies, and sound",
-            foreground="gray60"
         ).pack(side="left", padx=(8, 0))
 
-        queue_frame = ttk.LabelFrame(main, text="Queue")
-        queue_frame.pack(fill="both", expand=True, pady=(0, 10))
+        output_frame = self.create_section(main, "Output", fill="x", pady=(0, 10))
 
-        queue_table_frame = ttk.Frame(queue_frame)
+        folder_row = self.create_panel_row(output_frame)
+        folder_row.pack(fill="x", padx=8, pady=8)
+
+        self.output_entry = self.create_panel_entry(folder_row, self.output_folder)
+        self.output_entry.pack(side="left", fill="x", expand=True)
+        self.create_action_button(folder_row, text="Choose Folder", command=self.choose_folder).pack(side="left", padx=(8, 0))
+
+        queue_frame = self.create_section(main, "Queue", fill="both", expand=True, pady=(0, 10))
+
+        queue_table_frame = self.create_panel_row(queue_frame)
         queue_table_frame.pack(fill="both", expand=True, padx=8, pady=(8, 6))
 
         columns = ("status", "type", "name", "url")
@@ -157,6 +212,8 @@ class QueuedMediaDownloader:
         self.queue_list.column("type", width=80, minwidth=70, stretch=False)
         self.queue_list.column("name", width=190, minwidth=120)
         self.queue_list.column("url", width=420, minwidth=180)
+        self.queue_list.tag_configure("done", **self.QUEUE_DONE_ROW_COLORS)
+        self.queue_list.tag_configure("failed", **self.QUEUE_FAILED_ROW_COLORS)
 
         queue_scrollbar = ttk.Scrollbar(queue_table_frame, orient="vertical", command=self.queue_list.yview)
         self.queue_list.configure(yscrollcommand=queue_scrollbar.set)
@@ -166,45 +223,51 @@ class QueuedMediaDownloader:
         self.queue_list.bind("<Button-3>", self.show_queue_context_menu)
         self.queue_list.bind("<<TreeviewSelect>>", lambda event: self.update_button_states())
 
-        queue_help_row = ttk.Frame(queue_frame)
+        queue_help_row = self.create_panel_row(queue_frame)
         queue_help_row.pack(fill="x", padx=8, pady=(0, 8))
-        ttk.Label(
+        self.create_panel_label(
             queue_help_row,
-            text="Right-click an item for file actions and logs.",
-            foreground="gray60"
+            "Right-click an item for file actions and logs.",
+            muted=True
         ).pack(side="left")
-        self.clear_button = ttk.Button(queue_help_row, text="Clear Queue", command=self.clear_queue)
+        self.clear_button = self.create_action_button(queue_help_row, text="Clear Queue", command=self.clear_queue)
         self.clear_button.pack(side="right", padx=(0, 8))
-        self.remove_button = ttk.Button(queue_help_row, text="Remove Selected", command=self.remove_selected)
+        self.remove_button = self.create_action_button(queue_help_row, text="Remove Selected", command=self.remove_selected)
         self.remove_button.pack(side="right", padx=(0, 8))
 
-        progress_frame = ttk.LabelFrame(main, text="Progress")
-        progress_frame.pack(fill="x", pady=(0, 10))
+        progress_frame = self.create_section(main, "Progress", fill="x", pady=(0, 10))
 
-        progress_row = ttk.Frame(progress_frame)
+        progress_row = self.create_panel_row(progress_frame)
         progress_row.pack(fill="x", padx=8, pady=(8, 4))
-        self.progress = ttk.Progressbar(
-            progress_row,
-            mode="determinate",
-            maximum=100,
-            variable=self.progress_value
+        self.progress = self.create_progress_bar(progress_row)
+        self.progress.pack(fill="x", expand=True)
+
+        progress_status_row = self.create_panel_row(progress_frame)
+        progress_status_row.pack(fill="x", padx=8, pady=(0, 8))
+        self.create_panel_label(progress_status_row, variable=self.progress_status).pack(
+            side="left",
+            anchor="w",
+            fill="x",
+            expand=True
         )
-        self.progress.pack(side="left", fill="x", expand=True)
-        ttk.Label(progress_row, textvariable=self.progress_percent, width=7, anchor="e").pack(side="left", padx=(8, 0))
+        self.create_panel_label(
+            progress_status_row,
+            variable=self.progress_percent,
+            width=7,
+            anchor="e"
+        ).pack(side="right")
 
-        ttk.Label(progress_frame, textvariable=self.progress_status).pack(anchor="w", padx=8, pady=(0, 8))
+        control_row = tk.Frame(main, background=self.APP_BACKGROUND_COLOR)
+        control_row.pack(fill="x", padx=(18, 0), pady=(0, 8))
 
-        control_row = ttk.Frame(main)
-        control_row.pack(fill="x", pady=(0, 8))
-
-        self.start_button = ttk.Button(
+        self.start_button = self.create_action_button(
             control_row,
             text="Start Queue",
             command=self.start_queue
         )
         self.start_button.pack(side="left")
 
-        self.stop_button = ttk.Button(
+        self.stop_button = self.create_action_button(
             control_row,
             text="Stop After Current",
             state="disabled",
@@ -212,7 +275,7 @@ class QueuedMediaDownloader:
         )
         self.stop_button.pack(side="left", padx=(8, 0))
 
-        self.cancel_button = ttk.Button(
+        self.cancel_button = self.create_action_button(
             control_row,
             text="Cancel Current",
             state="disabled",
@@ -220,51 +283,475 @@ class QueuedMediaDownloader:
         )
         self.cancel_button.pack(side="left", padx=(8, 0))
 
-        footer_row = ttk.Frame(main)
-        footer_row.pack(fill="x")
-
-        ttk.Label(footer_row, textvariable=self.status).pack(side="left", anchor="w", fill="x", expand=True)
         self.output_folder.trace_add("write", lambda *_: self.update_button_states())
+        self.refresh_queue_list()
         self.update_button_states()
+        self.root.bind("<ButtonRelease-1>", self.clear_queue_selection_outside_queue, add="+")
+
+    def create_section(self, parent, title, fill="x", expand=False, pady=(0, 10)):
+        section = tk.Frame(parent, background=self.APP_BACKGROUND_COLOR)
+        section.pack(fill=fill, expand=expand, pady=pady)
+
+        tk.Label(
+            section,
+            text=title,
+            background=self.APP_BACKGROUND_COLOR,
+            foreground=self.PANEL_TITLE_COLOR,
+            font=self.SECTION_TITLE_FONT
+        ).pack(anchor="w", padx=(14, 0), pady=(0, 3))
+
+        content = tk.Frame(
+            section,
+            background=self.PANEL_BACKGROUND_COLOR,
+            highlightbackground=self.PANEL_BORDER_COLOR,
+            highlightcolor=self.PANEL_BORDER_COLOR,
+            highlightthickness=1,
+            borderwidth=0,
+            padx=10,
+            pady=8
+        )
+        content.pack(fill=fill, expand=expand)
+        return content
+
+    def create_panel_row(self, parent):
+        return tk.Frame(parent, background=self.PANEL_BACKGROUND_COLOR)
+
+    def create_panel_label(self, parent, text=None, variable=None, muted=False, width=None, anchor="w"):
+        options = {
+            "background": self.PANEL_BACKGROUND_COLOR,
+            "foreground": self.PANEL_MUTED_TEXT_COLOR if muted else self.PANEL_TEXT_COLOR,
+            "anchor": anchor,
+        }
+        if text is not None:
+            options["text"] = text
+        if variable is not None:
+            options["textvariable"] = variable
+        if width is not None:
+            options["width"] = width
+
+        return tk.Label(parent, **options)
+
+    def create_panel_entry(self, parent, variable):
+        return tk.Entry(
+            parent,
+            textvariable=variable,
+            background=self.FIELD_BACKGROUND_COLOR,
+            foreground=self.PANEL_TEXT_COLOR,
+            insertbackground=self.PANEL_TEXT_COLOR,
+            disabledbackground=self.FIELD_BACKGROUND_COLOR,
+            disabledforeground=self.PANEL_MUTED_TEXT_COLOR,
+            highlightbackground=self.PANEL_BORDER_COLOR,
+            highlightcolor=self.PROGRESS_FILL_COLOR,
+            highlightthickness=1,
+            relief="flat",
+            borderwidth=0
+        )
+
+    def create_progress_bar(self, parent):
+        canvas = tk.Canvas(
+            parent,
+            width=200,
+            height=12,
+            background=self.PANEL_BACKGROUND_COLOR,
+            highlightthickness=0,
+            borderwidth=0
+        )
+        canvas.bind("<Configure>", lambda event: self.update_progress_bar())
+        self.progress_track = None
+        self.progress_fill = None
+        return canvas
+
+    def update_progress_bar(self):
+        if not hasattr(self, "progress") or self.progress is None:
+            return
+
+        width = max(1, self.progress.winfo_width())
+        try:
+            configured_width = int(float(self.progress.cget("width")))
+        except (tk.TclError, TypeError, ValueError):
+            configured_width = 1
+        if width <= 1 and configured_width > 1:
+            width = configured_width
+        height = max(1, self.progress.winfo_height())
+        percent = min(100, max(0, float(self.progress_value.get())))
+        fill_width = max(0, int(width * percent / 100))
+
+        self.progress.delete("all")
+        self.progress.create_rectangle(
+            0,
+            2,
+            width,
+            max(3, height - 2),
+            fill=self.PROGRESS_TRACK_COLOR,
+            outline=""
+        )
+        if fill_width > 0:
+            self.progress.create_rectangle(
+                0,
+                2,
+                fill_width,
+                max(3, height - 2),
+                fill=self.PROGRESS_FILL_COLOR,
+                outline=""
+            )
+
+    def create_action_button(self, parent, text, command=None, state="normal"):
+        return tk.Button(
+            parent,
+            text=text,
+            command=command,
+            state=state,
+            background=self.BUTTON_BACKGROUND_COLOR,
+            foreground=self.BUTTON_TEXT_COLOR,
+            activebackground=self.BUTTON_ACTIVE_BACKGROUND_COLOR,
+            activeforeground=self.BUTTON_TEXT_COLOR,
+            disabledforeground="#2f3944",
+            highlightbackground=self.BUTTON_BACKGROUND_COLOR,
+            highlightcolor=self.BUTTON_BACKGROUND_COLOR,
+            font=self.BUTTON_FONT,
+            relief="raised",
+            borderwidth=1,
+            padx=14,
+            pady=3
+        )
+
+    def panel_radio_options(self):
+        return {
+            "background": self.PANEL_BACKGROUND_COLOR,
+            "foreground": self.PANEL_TEXT_COLOR,
+            "activebackground": self.PANEL_BACKGROUND_COLOR,
+            "activeforeground": self.PANEL_TEXT_COLOR,
+            "selectcolor": self.PANEL_BACKGROUND_COLOR,
+            "highlightthickness": 0,
+            "borderwidth": 0,
+        }
+
+    def configure_styles(self):
+        style = ttk.Style()
+        style.configure("App.TFrame", background=self.APP_BACKGROUND_COLOR)
+        style.configure("Panel.TFrame", background=self.PANEL_BACKGROUND_COLOR)
+        style.configure("App.TLabel", background=self.APP_BACKGROUND_COLOR, foreground=self.PANEL_TEXT_COLOR)
+        style.configure("Muted.App.TLabel", background=self.APP_BACKGROUND_COLOR, foreground=self.PANEL_MUTED_TEXT_COLOR)
+        style.configure("Panel.TLabel", background=self.PANEL_BACKGROUND_COLOR, foreground=self.PANEL_TEXT_COLOR)
+        style.configure(
+            "Muted.Panel.TLabel",
+            background=self.PANEL_BACKGROUND_COLOR,
+            foreground=self.PANEL_MUTED_TEXT_COLOR
+        )
+        style.configure(
+            "Floating.TLabelframe",
+            background=self.PANEL_BACKGROUND_COLOR,
+            bordercolor=self.PANEL_BORDER_COLOR,
+            relief="solid"
+        )
+        style.configure(
+            "Floating.TLabelframe.Label",
+            background=self.APP_BACKGROUND_COLOR,
+            foreground=self.PANEL_TITLE_COLOR,
+            font=self.SECTION_TITLE_FONT
+        )
+        style.configure(
+            "Panel.TRadiobutton",
+            background=self.PANEL_BACKGROUND_COLOR,
+            foreground=self.PANEL_TEXT_COLOR
+        )
+        style.map(
+            "Panel.TRadiobutton",
+            background=[("active", self.PANEL_BACKGROUND_COLOR)],
+            foreground=[("active", self.PANEL_TEXT_COLOR)]
+        )
 
     def add_header(self, parent):
-        header = ttk.Frame(parent)
-        header.pack(fill="x", pady=(0, 10))
+        self.header_background_source = self.load_header_background_source()
+        self.header_canvas = tk.Canvas(
+            parent,
+            height=self.HEADER_HEIGHT,
+            highlightthickness=0,
+            borderwidth=0,
+            background=self.APP_BACKGROUND_COLOR
+        )
+        self.header_canvas.pack(fill="x", pady=(0, 10))
+        self.header_canvas.bind("<Configure>", self.draw_header)
 
-        title_block = ttk.Frame(header)
-        title_block.pack(side="left", anchor="w")
+    def load_header_background_source(self):
+        background_path = Path(__file__).resolve().parent / self.HEADER_BACKGROUND_FILE
+        if not background_path.exists():
+            return None
 
-        ttk.Label(
-            title_block,
-            text="Albus’ Archive Automaton",
-            font=("Luminari", 36)
-        ).pack(anchor="w")
+        try:
+            if Image is not None:
+                return Image.open(background_path).convert("RGB")
 
-        ttk.Label(
-            title_block,
-            text="by gabe murray",
+            return tk.PhotoImage(file=str(background_path))
+        except Exception:
+            return None
+
+    def draw_header(self, event=None):
+        if self.header_canvas is None:
+            return
+
+        width = max(1, event.width if event is not None else self.header_canvas.winfo_width())
+        height = self.HEADER_HEIGHT
+        self.header_canvas.delete("all")
+        self.draw_header_background(width, height)
+
+        title_x = 16
+        instructions_y = height - 18
+        title_y = 47
+        byline_y = 91
+        shadow = "#111820"
+        title_fill = "#f3eee2"
+        byline_fill = "#c9c1b1"
+        instructions_fill = "#d7d0c3"
+
+        self.header_canvas.create_text(
+            title_x + 2,
+            title_y + 2,
+            text=self.HEADER_TITLE,
+            font=("Luminari", 36),
+            fill=shadow,
+            anchor="w"
+        )
+        self.header_canvas.create_text(
+            title_x,
+            title_y,
+            text=self.HEADER_TITLE,
+            font=("Luminari", 36),
+            fill=title_fill,
+            anchor="w"
+        )
+        self.header_canvas.create_text(
+            title_x + 1,
+            byline_y + 1,
+            text=self.HEADER_BYLINE,
             font=("Luminari", 13),
-            foreground="gray60"
-        ).pack(anchor="w", pady=(2, 0))
+            fill=shadow,
+            anchor="w"
+        )
+        self.header_canvas.create_text(
+            title_x,
+            byline_y,
+            text=self.HEADER_BYLINE,
+            font=("Luminari", 13),
+            fill=byline_fill,
+            anchor="w"
+        )
+        self.header_canvas.create_text(
+            title_x + 1,
+            instructions_y + 1,
+            text=self.HEADER_INSTRUCTIONS,
+            font=("Luminari", 13),
+            fill=shadow,
+            anchor="w"
+        )
+        self.header_canvas.create_text(
+            title_x,
+            instructions_y,
+            text=self.HEADER_INSTRUCTIONS,
+            font=("Luminari", 13),
+            fill=instructions_fill,
+            anchor="w"
+        )
 
-        self.add_header_logo(header)
+    def draw_header_background(self, width, height):
+        if self.header_background_source is None:
+            return
 
-    def add_header_logo(self, parent):
-        logo_path = Path(__file__).resolve().parent / "Assets" / "Albutron_mirrored.png"
-        if not logo_path.exists():
+        if Image is not None and ImageTk is not None and isinstance(self.header_background_source, Image.Image):
+            render_key = (width, height)
+            if self.header_background_render_key != render_key:
+                self.header_background_image = self.render_header_background(width, height)
+                self.header_background_render_key = render_key
+
+            if self.header_background_image is not None:
+                self.header_canvas.create_image(width // 2, height // 2, image=self.header_background_image, anchor="center")
+            return
+
+        source = self.header_background_source
+        scale = max(
+            1,
+            min(
+                source.width() // max(1, width),
+                source.height() // max(1, height)
+            )
+        )
+        self.header_background_image = source.subsample(scale, scale)
+        self.header_canvas.create_image(width // 2, height // 2, image=self.header_background_image, anchor="center")
+
+    def render_header_background(self, width, height):
+        source = self.header_background_source
+        target_width = max(1, int(width * self.HEADER_BACKGROUND_OVERSCAN))
+        target_height = max(1, int(height * self.HEADER_BACKGROUND_OVERSCAN))
+        if self.HEADER_BACKGROUND_FIT_MODE == "contain":
+            scale = min(target_width / source.width, target_height / source.height)
+        else:
+            scale = max(target_width / source.width, target_height / source.height)
+        resized_size = (
+            max(1, int(source.width * scale)),
+            max(1, int(source.height * scale))
+        )
+        resampling = getattr(getattr(Image, "Resampling", Image), "LANCZOS")
+        resized = source.resize(resized_size, resampling)
+        if self.HEADER_BACKGROUND_FIT_MODE == "contain":
+            canvas = Image.new("RGB", (width, height), self.APP_BACKGROUND_COLOR)
+            left = max(0, (width - resized.width) // 2)
+            top = max(0, height - resized.height)
+            canvas.paste(resized, (left, top))
+            return ImageTk.PhotoImage(canvas)
+
+        max_left = max(0, resized.width - width)
+        max_top = max(0, resized.height - height)
+        focus_x = int(resized.width * self.HEADER_BACKGROUND_FOCUS_X)
+        focus_y = int(resized.height * self.HEADER_BACKGROUND_FOCUS_Y)
+        left = min(max_left, max(0, focus_x - width // 2))
+        top = min(max_top, max(0, focus_y - height // 2))
+        cropped = resized.crop((left, top, left + width, top + height))
+        return ImageTk.PhotoImage(cropped)
+
+    # App state persistence ----------------------------------------------
+
+    def app_state_path(self):
+        return Path(__file__).resolve().parent / self.APP_STATE_FILE
+
+    def load_app_state(self):
+        path = self.app_state_path()
+        if not path.exists():
             return
 
         try:
-            original_logo = tk.PhotoImage(file=str(logo_path))
-            scale = max(
-                1,
-                (original_logo.width() + 219) // 220,
-                (original_logo.height() + 79) // 80
+            with path.open("r", encoding="utf-8") as file:
+                state = json.load(file)
+        except Exception:
+            return
+
+        if not isinstance(state, dict):
+            return
+
+        settings = state.get("settings", {})
+        if isinstance(settings, dict):
+            self.apply_saved_settings(settings)
+
+        self.items = self.valid_saved_items(state.get("items", []))
+        self.current_index = self.first_runnable_queue_index()
+
+        geometry = state.get("geometry")
+        if self.valid_geometry(geometry):
+            self.root.geometry(geometry)
+
+    def apply_saved_settings(self, settings):
+        string_settings = {
+            "url": self.url,
+            "custom_name": self.custom_name,
+            "output_folder": self.output_folder,
+            "browser_name": self.browser_name,
+        }
+        for key, variable in string_settings.items():
+            value = settings.get(key)
+            if isinstance(value, str):
+                variable.set(value)
+
+        mode = settings.get("media_mode")
+        if mode in {"video", "audio", "images"}:
+            self.media_mode.set(mode)
+
+        browser = settings.get("browser_name")
+        if browser in {"Firefox", "Chrome", "Safari"}:
+            self.browser_name.set(browser)
+
+        boolean_settings = {
+            "use_browser_cookies": self.use_browser_cookies,
+            "scan_direct_media": self.scan_direct_media,
+            "auto_start": self.auto_start,
+            "audio_lossless_wav": self.audio_lossless_wav,
+            "ding_on_complete": self.ding_on_complete,
+        }
+        for key, variable in boolean_settings.items():
+            value = settings.get(key)
+            if isinstance(value, bool):
+                variable.set(value)
+
+    def valid_saved_items(self, items):
+        if not isinstance(items, list):
+            return []
+
+        saved_items = []
+        for item in items:
+            if not isinstance(item, dict) or not isinstance(item.get("url"), str):
+                continue
+
+            mode = item.get("mode") if item.get("mode") in {"video", "audio", "images"} else "video"
+            status = item.get("status") if isinstance(item.get("status"), str) else "Queued"
+            if status == "Downloading":
+                status = "Queued"
+
+            saved_items.append({
+                "url": item["url"],
+                "name": item.get("name", "") if isinstance(item.get("name", ""), str) else "",
+                "mode": mode,
+                "status": status,
+                "cookies_browser": item.get("cookies_browser") if isinstance(item.get("cookies_browser"), str) else None,
+                "scan_direct_media": item.get("scan_direct_media", True) is not False,
+                "log": item.get("log", []) if isinstance(item.get("log"), list) else [],
+                "failure_detail": item.get("failure_detail", "") if isinstance(item.get("failure_detail", ""), str) else "",
+                "saved_paths": item.get("saved_paths", []) if isinstance(item.get("saved_paths", []), list) else [],
+            })
+
+        return saved_items
+
+    def first_runnable_queue_index(self):
+        for index, item in enumerate(self.items):
+            if item.get("status") == "Queued":
+                return index
+
+        return len(self.items)
+
+    def valid_geometry(self, geometry):
+        if not isinstance(geometry, str):
+            return False
+
+        return re.match(r"^\d+x\d+(?:[+-]\d+){0,2}$", geometry) is not None
+
+    def save_app_state(self):
+        state = {
+            "geometry": self.root.geometry(),
+            "settings": {
+                "url": self.url.get(),
+                "custom_name": self.custom_name.get(),
+                "media_mode": self.media_mode.get(),
+                "output_folder": self.output_folder.get(),
+                "use_browser_cookies": self.use_browser_cookies.get(),
+                "scan_direct_media": self.scan_direct_media.get(),
+                "auto_start": self.auto_start.get(),
+                "audio_lossless_wav": self.audio_lossless_wav.get(),
+                "browser_name": self.browser_name.get(),
+                "ding_on_complete": self.ding_on_complete.get(),
+            },
+            "items": self.items,
+        }
+
+        path = self.app_state_path()
+        temp_path = path.with_suffix(path.suffix + ".tmp")
+        try:
+            with temp_path.open("w", encoding="utf-8") as file:
+                json.dump(state, file, indent=2)
+            temp_path.replace(path)
+        except Exception:
+            pass
+
+    def on_app_close(self):
+        if self.running:
+            should_quit = messagebox.askyesno(
+                "Quit while downloading?",
+                "A download is still running. Quit and stop the current download?"
             )
-            self.logo_image = original_logo.subsample(scale, scale)
-            ttk.Label(parent, image=self.logo_image).pack(side="right", anchor="e")
-        except tk.TclError:
-            self.logo_image = None
+            if not should_quit:
+                return
+
+            self.cancel_current = True
+            self.terminate_active_process()
+
+        self.save_app_state()
+        self.root.destroy()
 
     def choose_folder(self):
         folder = filedialog.askdirectory(title="Choose save location")
@@ -383,6 +870,25 @@ class QueuedMediaDownloader:
         except tk.TclError:
             self.browser_combo = None
 
+    # UI state helpers ----------------------------------------------------
+
+    def clear_queue_selection_outside_queue(self, event):
+        if not hasattr(self, "queue_list") or not self.queue_list.selection():
+            return
+
+        widget = event.widget
+        while widget is not None:
+            if widget is self.queue_list:
+                return
+            try:
+                widget = widget.master
+            except AttributeError:
+                break
+
+        self.queue_list.selection_remove(self.queue_list.selection())
+        self.queue_list.focus("")
+        self.update_button_states()
+
     def update_button_states(self):
         selected = self.selected_queue_indices()
         can_start = (
@@ -414,6 +920,8 @@ class QueuedMediaDownloader:
             return browser
 
         return "firefox"
+
+    # Entry undo support --------------------------------------------------
 
     def setup_entry_undo(self, entry, variable):
         self.entry_undo_states[entry] = {
@@ -518,6 +1026,8 @@ class QueuedMediaDownloader:
         state["after_id"] = None
         state["applying"] = False
 
+    # Queue management ----------------------------------------------------
+
     def add_to_queue(self):
         url = self.url.get().strip()
         name = self.custom_name.get().strip()
@@ -611,13 +1121,24 @@ class QueuedMediaDownloader:
         for index, item in enumerate(self.items):
             display_name = item["name"] if item["name"] else "(use media title)"
             mode = self.media_mode_label(item.get("mode", "video"))
+            row_tags = self.queue_row_tags(item)
             self.queue_list.insert(
                 "",
                 "end",
                 iid=str(index),
-                values=(item["status"], mode, display_name, item["url"])
+                values=(item["status"], mode, display_name, item["url"]),
+                tags=row_tags
             )
         self.update_button_states()
+
+    def queue_row_tags(self, item):
+        status = item.get("status")
+        if status == "Done":
+            return ("done",)
+        if status == "Failed":
+            return ("failed",)
+
+        return ()
 
     def selected_queue_indices(self):
         if not hasattr(self, "queue_list"):
@@ -694,7 +1215,10 @@ class QueuedMediaDownloader:
         self.log_message("Cancel requested by user.")
         self.terminate_active_process()
 
+    # Queue execution -----------------------------------------------------
+
     def run_queue(self):
+        """Process queued items on a worker thread and marshal UI updates safely."""
         try:
             folder = self.output_folder.get().strip()
 
@@ -791,7 +1315,10 @@ class QueuedMediaDownloader:
             self.root.after(0, lambda: self.cancel_button.config(state="disabled"))
             self.root.after(0, self.update_button_states)
 
+    # Mode dispatch and download flows -----------------------------------
+
     def download_one(self, url, folder, custom_name, mode="video", cookies_browser=None, scan_direct_media=True):
+        """Dispatch one queued URL to the selected download mode."""
         if mode == "images":
             return self.download_images(url, folder, custom_name, cookies_browser)
         if mode == "audio":
@@ -800,6 +1327,7 @@ class QueuedMediaDownloader:
         return self.download_video(url, folder, custom_name, cookies_browser, allow_discovery=scan_direct_media)
 
     def download_audio(self, url, folder, custom_name, cookies_browser=None, allow_discovery=True):
+        """Download the best available audio, defaulting to MP3 unless WAV is selected."""
         ffmpeg_path = self.get_ffmpeg_path()
 
         self.log_message(f"Using ffmpeg:")
@@ -827,6 +1355,7 @@ class QueuedMediaDownloader:
             return [final_path]
 
     def download_video(self, url, folder, custom_name, cookies_browser=None, allow_discovery=True):
+        """Download video as a QuickTime-friendly MP4, converting when necessary."""
         ffmpeg_path = self.get_ffmpeg_path()
 
         self.log_message(f"Using ffmpeg:")
@@ -877,7 +1406,10 @@ class QueuedMediaDownloader:
 
             return self.convert_to_compatible_mp4(best_file, final_path, ffmpeg_path)
 
+    # Direct media discovery fallback ------------------------------------
+
     def try_discovered_direct_media(self, page_url, folder, custom_name, cookies_browser=None, mode="video"):
+        """Try direct media URLs scraped from a page after yt-dlp fails."""
         self.log_message("")
         self.log_message("yt-dlp failed. Scanning this page once for direct media URLs...")
         self.safe_progress_status("Scanning page for direct media URLs...")
@@ -915,9 +1447,7 @@ class QueuedMediaDownloader:
         return False
 
     def discover_direct_media_urls(self, page_url, mode="video"):
-        # Conservative fallback: fetch only the original pasted page once and
-        # inspect that response for direct media URLs. This intentionally does
-        # not crawl, execute JavaScript, or follow links to other pages.
+        """Fetch one page and extract direct media links without crawling."""
         try:
             request = Request(
                 page_url,
@@ -1105,15 +1635,14 @@ class QueuedMediaDownloader:
         return ""
 
     def direct_media_extensions(self, mode="any"):
-        video_extensions = (".mp4", ".m3u8", ".mpd", ".mov", ".webm")
-        audio_extensions = (".m4a", ".mp3", ".aac", ".flac", ".wav", ".ogg", ".oga", ".opus")
-
         if mode == "video":
-            return video_extensions
+            return self.VIDEO_EXTENSIONS
         if mode == "audio":
-            return audio_extensions + video_extensions
+            return self.AUDIO_EXTENSIONS + self.VIDEO_EXTENSIONS
 
-        return audio_extensions + video_extensions
+        return self.AUDIO_EXTENSIONS + self.VIDEO_EXTENSIONS
+
+    # Tool-specific download commands ------------------------------------
 
     def download_images(self, url, folder, custom_name, cookies_browser=None):
         self.log_message("Using gallery-dl for image download.")
@@ -1182,13 +1711,9 @@ class QueuedMediaDownloader:
         return command
 
     def find_downloaded_images(self, temp_dir):
-        image_extensions = {
-            ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tif", ".tiff", ".avif"
-        }
-
         files = [
             p for p in temp_dir.rglob("*")
-            if p.is_file() and p.suffix.lower() in image_extensions
+            if p.is_file() and p.suffix.lower() in self.IMAGE_EXTENSIONS
         ]
 
         return sorted(files, key=lambda p: str(p.relative_to(temp_dir)).lower())
@@ -1330,7 +1855,7 @@ class QueuedMediaDownloader:
         return command
 
     def audio_file_extensions(self):
-        return {".m4a", ".mp3", ".aac", ".flac", ".wav", ".ogg", ".oga", ".opus"}
+        return set(self.AUDIO_EXTENSIONS)
 
     def selected_audio_format(self):
         return "wav" if self.audio_lossless_wav.get() else "mp3"
@@ -1394,6 +1919,8 @@ class QueuedMediaDownloader:
         self.log_message("Conversion failed or produced a tiny file.")
         temp_output.unlink(missing_ok=True)
         return False
+
+    # Process control and completion sound --------------------------------
 
     def terminate_active_process(self):
         with self.active_process_lock:
@@ -1476,7 +2003,10 @@ class QueuedMediaDownloader:
         except Exception:
             pass
 
+    # Command output and progress parsing ---------------------------------
+
     def run_command_live(self, command, compact_ffmpeg=False, progress_label=None, source_duration=None):
+        """Run a subprocess, capture its logs, and update progress from output."""
         self.log_message(" ".join(command))
         self.log_message("")
 
@@ -1505,6 +2035,9 @@ class QueuedMediaDownloader:
 
                 if compact_ffmpeg and "frame=" in clean_line:
                     now = time.monotonic()
+                    percent = self.progress_percent_from_ffmpeg_line(clean_line, source_duration)
+                    if percent is not None:
+                        self.safe_progress_value(percent)
                     progress_text = self.progress_from_ffmpeg_line(clean_line, progress_label, source_duration)
                     if progress_text:
                         self.safe_progress_status(progress_text)
@@ -1516,6 +2049,10 @@ class QueuedMediaDownloader:
                 detected_label = self.progress_label_from_tool_line(clean_line, progress_label)
                 if detected_label:
                     active_progress_label = detected_label
+
+                percent = self.progress_percent_from_status(clean_line)
+                if percent is not None:
+                    self.safe_progress_value(percent)
 
                 progress_text = self.progress_from_tool_line(clean_line, active_progress_label)
                 if progress_text:
@@ -1534,17 +2071,13 @@ class QueuedMediaDownloader:
         if not label:
             return None
 
-        percent = re.search(r"(\d+(?:\.\d+)?)%", line)
         speed = re.search(r"\bat\s+([0-9.]+\s*[KMGTP]?i?B/s)", line, re.IGNORECASE)
 
-        details = []
-        if percent:
-            details.append(f"{percent.group(1)}%")
         if speed:
-            details.append(speed.group(1).replace(" ", ""))
+            return f"{label}... {speed.group(1).replace(' ', '')}"
 
-        if details:
-            return f"{label}... {' - '.join(details)}"
+        if self.progress_percent_from_status(line) is not None:
+            return f"{label}..."
 
         return None
 
@@ -1574,27 +2107,25 @@ class QueuedMediaDownloader:
         if not label:
             return None
 
-        time_match = re.search(r"time=\s*([0-9:.]+)", line)
         speed_match = re.search(r"speed=\s*([0-9.]+)x", line)
+        if speed_match:
+            return f"{label}... speed {float(speed_match.group(1)):.2f}x"
+
+        if self.progress_percent_from_ffmpeg_line(line, source_duration) is not None:
+            return f"{label}..."
+
+        return None
+
+    def progress_percent_from_ffmpeg_line(self, line, source_duration=None):
+        time_match = re.search(r"time=\s*([0-9:.]+)", line)
         if not time_match:
             return None
 
         elapsed = self.duration_string_to_seconds(time_match.group(1))
-        speed = float(speed_match.group(1)) if speed_match else 0
-
-        details = []
         if source_duration and source_duration > 0:
-            percent = min(100, max(0, elapsed / source_duration * 100))
-            details.append(f"{percent:.0f}%")
-            if speed > 0:
-                details.append(f"speed {speed:.2f}x")
-        elif speed > 0:
-            details.append(f"speed {speed:.2f}x")
+            return min(100, max(0, elapsed / source_duration * 100))
 
-        if details:
-            return f"{label}... {' - '.join(details)}"
-
-        return f"{label}..."
+        return None
 
     def media_duration_seconds(self, file_path, ffmpeg_path):
         command = [
@@ -1658,6 +2189,8 @@ class QueuedMediaDownloader:
         has_aac = "audio: aac" in info
 
         return is_mp4 and has_h264 and has_aac
+
+    # Output naming and filesystem helpers --------------------------------
 
     def final_output_path(self, folder, source_file, custom_name):
         if custom_name:
@@ -1727,6 +2260,8 @@ class QueuedMediaDownloader:
                 return candidate
             counter += 1
 
+    # Tool lookup, logging, and item actions -------------------------------
+
     def get_ffmpeg_path(self):
         system_ffmpeg = shutil.which("ffmpeg")
         if system_ffmpeg:
@@ -1756,6 +2291,8 @@ class QueuedMediaDownloader:
 
         return "Download failed. Open the item log for details."
 
+    # Queue context menu actions ------------------------------------------
+
     def show_queue_context_menu(self, event):
         item_id = self.queue_list.identify_row(event.y)
         if not item_id:
@@ -1783,6 +2320,10 @@ class QueuedMediaDownloader:
             label="Reset to Inputs",
             command=lambda: self.reset_failed_item_to_inputs(index),
             state="normal" if is_failed else "disabled"
+        )
+        menu.add_command(
+            label="Copy Link",
+            command=lambda: self.copy_item_link(index)
         )
         menu.add_separator()
         menu.add_command(
@@ -1844,6 +2385,16 @@ class QueuedMediaDownloader:
             for path in item.get("saved_paths", [])
             if path and Path(path).exists()
         ]
+
+    def copy_item_link(self, index):
+        url = self.items[index].get("url", "")
+        if not url:
+            self.status.set("No link was found for this item.")
+            return
+
+        self.root.clipboard_clear()
+        self.root.clipboard_append(url)
+        self.status.set("Copied link.")
 
     def open_saved_files(self, index):
         saved_paths = self.existing_saved_paths(self.items[index])
@@ -1965,6 +2516,8 @@ class QueuedMediaDownloader:
 
         text.config(state="disabled")
 
+    # Thread-safe UI updates ----------------------------------------------
+
     def safe_status(self, message):
         self.log_queue.put(("status", message))
 
@@ -1978,6 +2531,7 @@ class QueuedMediaDownloader:
         self.log_queue.put(("refresh", None))
 
     def process_log_queue(self):
+        """Apply worker-thread messages to Tk variables on the main thread."""
         try:
             while True:
                 kind, value = self.log_queue.get_nowait()
@@ -2011,6 +2565,7 @@ class QueuedMediaDownloader:
     def set_progress_value(self, value):
         percent = min(100, max(0, float(value)))
         self.progress_value.set(percent)
+        self.update_progress_bar()
         if percent.is_integer():
             self.progress_percent.set(f"{percent:.0f}%")
         else:

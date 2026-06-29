@@ -7,6 +7,9 @@ __pycache__/
 build/
 dist/
 .DS_Store
+**/.DS_Store
 .venv/
 venv/
 .env
+.albus_archive_automaton_state.json
+Unused Assets/
