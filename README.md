@@ -8,12 +8,16 @@ A simple macOS desktop app for downloading video, audio, or image media from URL
 - macOS (the app is designed for macOS and includes a .command launcher)
 - ffmpeg available on your system or bundled via Python
 
+## Install Python
+
+If Python is not installed, install Python from the official installer at https://www.python.org/downloads/macos/.
+
 ## Install dependencies
 
 Open Terminal and run these commands from this folder:
 
 ```bash
-brew install python ffmpeg
+brew install ffmpeg
 python3 -m pip install -r requirements.txt
 ```
 
@@ -36,7 +40,7 @@ xattr -dr com.apple.quarantine Open_Albus_Archive_Automaton.command
 ## How to use it
 
 1. Choose a save folder.
-2. Paste one or more media URLs into the queue.
+2. Paste a URL into the queue.
 3. Optionally enter a custom file name without an extension.
 4. Choose Video, Audio Only, or Images mode.
 5. Click Add to Queue, then Start Queue.
