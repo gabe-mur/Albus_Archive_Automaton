@@ -219,6 +219,7 @@ class QueuedMediaDownloader:
         self.queue_list.configure(yscrollcommand=queue_scrollbar.set)
         self.queue_list.pack(side="left", fill="both", expand=True)
         queue_scrollbar.pack(side="right", fill="y")
+        self.queue_list.bind("<Double-1>", self.open_queue_item_file)
         self.queue_list.bind("<Button-2>", self.show_queue_context_menu)
         self.queue_list.bind("<Button-3>", self.show_queue_context_menu)
         self.queue_list.bind("<<TreeviewSelect>>", lambda event: self.update_button_states())
@@ -2292,6 +2293,21 @@ class QueuedMediaDownloader:
         return "Download failed. Open the item log for details."
 
     # Queue context menu actions ------------------------------------------
+
+    def open_queue_item_file(self, event):
+        item_id = self.queue_list.identify_row(event.y)
+        if not item_id:
+            return
+
+        try:
+            index = int(item_id)
+        except ValueError:
+            return
+
+        if 0 <= index < len(self.items):
+            self.queue_list.selection_set(item_id)
+            self.queue_list.focus(item_id)
+            self.open_saved_files(index)
 
     def show_queue_context_menu(self, event):
         item_id = self.queue_list.identify_row(event.y)

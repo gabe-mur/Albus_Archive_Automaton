@@ -39,11 +39,14 @@ xattr -dr com.apple.quarantine Open_Albus_Archive_Automaton.command
 
 ## How to use it
 
-1. Choose a save folder.
-2. Paste a URL into the queue.
-3. Optionally enter a custom file name without an extension.
-4. Choose Video, Audio Only, or Images mode.
-5. Click Add to Queue, then Start Queue.
+1. Paste a media URL into the Link field.
+2. Optionally enter a custom file name without an extension.
+3. Choose Video, Audio Only, or Images mode.
+4. Choose a save folder.
+5. Click Add to Queue.
+6. Add any other URLs you want to download.
+7. Click Start Queue.
+8. When an item finishes, right-click it for file actions or double-click it to open the saved file.
 
 ## Notes
 
