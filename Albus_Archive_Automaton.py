@@ -69,10 +69,27 @@ class QueuedMediaDownloader:
     SYSTEM_SOUND_DIR = Path("/System/Library/Sounds")
     COMPLETION_SOUND_NAMES = ("Blow.aiff", "Glass.aiff")
     COMPLETION_SOUND_VOLUME = 0.6
+    COMPLETION_SOUND_NONE = "None"
+    DEFAULT_COMPLETION_SOUND = "Bark"
+    COMPLETION_SOUND_OPTIONS = ("Chime", "Bark", COMPLETION_SOUND_NONE)
+    LEGACY_COMPLETION_SOUND_CHOICES = {
+        "Bark 1": "Bark",
+        "Bark 2": "Bark",
+    }
+    COMPLETION_SOUND_ASSETS = {
+        "Chime": (Path("Assets") / "Blow.aiff", 0.6),
+        "Bark": (Path("Assets") / "Albus Bark.mp3", 0.42),
+    }
 
     VIDEO_EXTENSIONS = (".mp4", ".m3u8", ".mpd", ".mov", ".webm")
     AUDIO_EXTENSIONS = (".m4a", ".mp3", ".aac", ".flac", ".wav", ".ogg", ".oga", ".opus")
     IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tif", ".tiff", ".avif")
+    SPOTIFY_PREVIEW_CLIP_PATH = "/audio/clips/"
+    DRM_FAILURE_DETAIL = (
+        "Protected/DRM content is not downloadable by this app. "
+        "Try a non-DRM source for the same media, such as the publisher page, "
+        "RSS feed enclosure URL, or a licensor-provided download file."
+    )
 
     def __init__(self, root):
         self.root = root
@@ -89,6 +106,7 @@ class QueuedMediaDownloader:
         self.audio_lossless_wav = tk.BooleanVar(value=False)
         self.browser_name = tk.StringVar(value="Firefox")
         self.ding_on_complete = tk.BooleanVar(value=True)
+        self.completion_sound_choice = tk.StringVar(value=self.DEFAULT_COMPLETION_SOUND)
         self.status = tk.StringVar(value="")
         self.progress_status = tk.StringVar(value="Idle")
         self.progress_value = tk.DoubleVar(value=0)
@@ -106,6 +124,7 @@ class QueuedMediaDownloader:
         self.entry_undo_states = {}
         self.advanced_window = None
         self.browser_combo = None
+        self.completion_sound_combo = None
         self.logo_image = None
         self.header_canvas = None
         self.header_background_source = None
@@ -645,6 +664,7 @@ class QueuedMediaDownloader:
             "custom_name": self.custom_name,
             "output_folder": self.output_folder,
             "browser_name": self.browser_name,
+            "completion_sound_choice": self.completion_sound_choice,
         }
         for key, variable in string_settings.items():
             value = settings.get(key)
@@ -670,6 +690,16 @@ class QueuedMediaDownloader:
             value = settings.get(key)
             if isinstance(value, bool):
                 variable.set(value)
+
+        if "completion_sound_choice" not in settings:
+            self.completion_sound_choice.set(
+                self.DEFAULT_COMPLETION_SOUND if self.ding_on_complete.get() else self.COMPLETION_SOUND_NONE
+            )
+        else:
+            self.completion_sound_choice.set(
+                self.normalize_completion_sound_choice(settings.get("completion_sound_choice"))
+            )
+        self.ding_on_complete.set(self.completion_sound_choice.get() != self.COMPLETION_SOUND_NONE)
 
     def valid_saved_items(self, items):
         if not isinstance(items, list):
@@ -713,6 +743,7 @@ class QueuedMediaDownloader:
         return re.match(r"^\d+x\d+(?:[+-]\d+){0,2}$", geometry) is not None
 
     def save_app_state(self):
+        completion_sound_choice = self.normalize_completion_sound_choice(self.completion_sound_choice.get())
         state = {
             "geometry": self.root.geometry(),
             "settings": {
@@ -725,7 +756,8 @@ class QueuedMediaDownloader:
                 "auto_start": self.auto_start.get(),
                 "audio_lossless_wav": self.audio_lossless_wav.get(),
                 "browser_name": self.browser_name.get(),
-                "ding_on_complete": self.ding_on_complete.get(),
+                "ding_on_complete": completion_sound_choice != self.COMPLETION_SOUND_NONE,
+                "completion_sound_choice": completion_sound_choice,
             },
             "items": self.items,
         }
@@ -824,11 +856,19 @@ class QueuedMediaDownloader:
             wraplength=420
         ).pack(anchor="w", pady=(0, 10))
 
-        ttk.Checkbutton(
-            body,
-            text="Ding when finished",
-            variable=self.ding_on_complete
-        ).pack(anchor="w")
+        sound_row = ttk.Frame(body)
+        sound_row.pack(fill="x")
+
+        ttk.Label(sound_row, text="Completion sound:").pack(side="left")
+        self.completion_sound_combo = ttk.Combobox(
+            sound_row,
+            textvariable=self.completion_sound_choice,
+            values=self.COMPLETION_SOUND_OPTIONS,
+            state="readonly",
+            width=12
+        )
+        self.completion_sound_combo.pack(side="left", padx=(6, 0))
+        self.completion_sound_combo.bind("<<ComboboxSelected>>", self.on_completion_sound_selected)
 
         button_row = ttk.Frame(body)
         button_row.pack(fill="x", pady=(14, 0))
@@ -843,6 +883,21 @@ class QueuedMediaDownloader:
             self.advanced_window.destroy()
         self.advanced_window = None
         self.browser_combo = None
+        self.completion_sound_combo = None
+
+    def on_completion_sound_selected(self, event=None):
+        sound_choice = self.normalize_completion_sound_choice(self.completion_sound_choice.get())
+        self.completion_sound_choice.set(sound_choice)
+        self.ding_on_complete.set(sound_choice != self.COMPLETION_SOUND_NONE)
+        if sound_choice != self.COMPLETION_SOUND_NONE:
+            self.play_completion_sound(sound_choice)
+
+    def normalize_completion_sound_choice(self, sound_choice):
+        sound_choice = self.LEGACY_COMPLETION_SOUND_CHOICES.get(sound_choice, sound_choice)
+        if sound_choice in self.COMPLETION_SOUND_OPTIONS:
+            return sound_choice
+
+        return self.DEFAULT_COMPLETION_SOUND
 
     def center_child_window(self, window):
         self.root.update_idletasks()
@@ -1476,6 +1531,7 @@ class QueuedMediaDownloader:
         text = raw.decode(encoding, errors="replace")
         title = self.extract_page_title(text)
         candidates = self.extract_media_urls_from_text(text, base_url=page_url, mode=mode)
+        candidates = self.filter_discovered_media_candidates(candidates, page_url)
         return self.rank_media_candidates(candidates, page_url=page_url, page_title=title, mode=mode)
 
     def page_scan_ssl_context(self):
@@ -1606,6 +1662,36 @@ class QueuedMediaDownloader:
             return (type_rank + tracker_penalty + keyword_bonus + scheme_penalty, len(candidate), candidate)
 
         return sorted(candidates, key=score)
+
+    def filter_discovered_media_candidates(self, candidates, page_url):
+        filtered = []
+        skipped_spotify_previews = 0
+
+        for candidate in candidates:
+            if self.is_spotify_episode_url(page_url) and self.is_spotify_preview_clip_url(candidate):
+                skipped_spotify_previews += 1
+                continue
+
+            filtered.append(candidate)
+
+        if skipped_spotify_previews:
+            plural = "" if skipped_spotify_previews == 1 else "s"
+            self.log_message(
+                f"Skipped {skipped_spotify_previews} Spotify preview clip{plural}; "
+                "Spotify episode pages do not expose the full episode as a direct media file."
+            )
+
+        return filtered
+
+    def is_spotify_episode_url(self, url):
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").lower()
+        return host == "open.spotify.com" and parsed.path.startswith("/episode/")
+
+    def is_spotify_preview_clip_url(self, url):
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").lower()
+        return host.endswith("spotifycdn.com") and self.SPOTIFY_PREVIEW_CLIP_PATH in parsed.path.lower()
 
     def page_keywords(self, page_url=None, page_title=None):
         source = " ".join(part for part in [page_url or "", page_title or ""] if part)
@@ -1961,36 +2047,58 @@ class QueuedMediaDownloader:
                 self.log_message(f"Could not delete canceled output {path}: {e}")
 
     def play_queue_finished_sound(self):
-        if not self.ding_on_complete.get():
-            return
-
         self.play_completion_sound()
 
-    def play_completion_sound(self):
-        sound_path = self.completion_sound_path()
+    def play_completion_sound(self, sound_choice=None):
+        sound_choice = self.normalize_completion_sound_choice(sound_choice or self.completion_sound_choice.get())
+        if sound_choice == self.COMPLETION_SOUND_NONE:
+            return
+
+        sound_path, volume = self.completion_sound_config(sound_choice)
+        if sound_path is None:
+            self.ring_system_bell()
+            return
+
         afplay = shutil.which("afplay")
-        if not sound_path or not afplay:
+        if not afplay:
             self.ring_system_bell()
             return
 
         threading.Thread(
             target=self.play_sound_file,
-            args=(afplay, sound_path),
+            args=(afplay, sound_path, volume),
             daemon=True
         ).start()
 
+    def completion_sound_config(self, sound_choice=None):
+        sound_choice = sound_choice or self.completion_sound_choice.get()
+        if sound_choice == self.COMPLETION_SOUND_NONE:
+            return None, None
+
+        relative_path, volume = self.COMPLETION_SOUND_ASSETS.get(
+            sound_choice,
+            self.COMPLETION_SOUND_ASSETS["Chime"]
+        )
+        asset_path = Path(__file__).resolve().parent / relative_path
+        if asset_path.exists():
+            return asset_path, volume
+
+        if sound_choice == "Chime":
+            for sound_name in self.COMPLETION_SOUND_NAMES:
+                sound_path = self.SYSTEM_SOUND_DIR / sound_name
+                if sound_path.exists():
+                    return sound_path, self.COMPLETION_SOUND_VOLUME
+
+        return None, None
+
     def completion_sound_path(self):
-        for sound_name in self.COMPLETION_SOUND_NAMES:
-            sound_path = self.SYSTEM_SOUND_DIR / sound_name
-            if sound_path.exists():
-                return sound_path
+        sound_path, _volume = self.completion_sound_config()
+        return sound_path
 
-        return None
-
-    def play_sound_file(self, afplay, sound_path):
+    def play_sound_file(self, afplay, sound_path, volume):
         try:
             subprocess.run(
-                [afplay, "-v", str(self.COMPLETION_SOUND_VOLUME), str(sound_path)],
+                [afplay, "-v", str(volume), str(sound_path)],
                 check=True,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL
@@ -2029,10 +2137,14 @@ class QueuedMediaDownloader:
 
             last_ffmpeg_update = 0
             active_progress_label = progress_label
+            saw_drm_error = False
             for line in process.stdout:
                 clean_line = line.replace("\r", "\n").strip()
                 if not clean_line:
                     continue
+
+                if self.is_drm_protection_log_line(clean_line):
+                    saw_drm_error = True
 
                 if compact_ffmpeg and "frame=" in clean_line:
                     now = time.monotonic()
@@ -2062,6 +2174,8 @@ class QueuedMediaDownloader:
                 self.log_message(clean_line)
 
             process.wait()
+            if process.returncode != 0 and saw_drm_error:
+                self.log_drm_protected_content_help()
             return process.returncode
         finally:
             with self.active_process_lock:
@@ -2285,12 +2399,37 @@ class QueuedMediaDownloader:
         self.log_queue.put(("log", message))
 
     def last_error_from_log(self, item):
+        if self.item_log_has_drm_error(item):
+            return self.DRM_FAILURE_DETAIL
+
         error_words = ("error", "failed", "exception", "permission", "login", "cookies")
         for line in reversed(item.get("log", [])):
             if any(word in line.lower() for word in error_words):
                 return line
 
         return "Download failed. Open the item log for details."
+
+    def item_log_has_drm_error(self, item):
+        return any(self.is_drm_protection_log_line(line) for line in item.get("log", []))
+
+    def is_drm_protection_log_line(self, line):
+        lower_line = line.lower()
+        drm_phrases = (
+            "[drm]",
+            "drm protection",
+            "drm protected",
+            "known to use drm",
+            "protected by drm",
+        )
+        return any(phrase in lower_line for phrase in drm_phrases)
+
+    def log_drm_protected_content_help(self):
+        if self.active_log_item is not None:
+            if any(line == self.DRM_FAILURE_DETAIL for line in self.active_log_item.get("log", [])):
+                return
+
+        self.log_message("")
+        self.log_message(self.DRM_FAILURE_DETAIL)
 
     # Queue context menu actions ------------------------------------------
 
@@ -2329,13 +2468,11 @@ class QueuedMediaDownloader:
         saved_paths = self.existing_saved_paths(item)
         has_files = bool(saved_paths)
         plural = len(saved_paths) != 1
-        is_failed = item.get("status") == "Failed"
 
         menu = tk.Menu(self.root, tearoff=0)
         menu.add_command(
             label="Reset to Inputs",
-            command=lambda: self.reset_failed_item_to_inputs(index),
-            state="normal" if is_failed else "disabled"
+            command=lambda: self.reset_item_to_inputs(index)
         )
         menu.add_command(
             label="Copy Link",
@@ -2371,11 +2508,12 @@ class QueuedMediaDownloader:
         finally:
             menu.grab_release()
 
-    def reset_failed_item_to_inputs(self, index):
-        item = self.items[index]
-        if item.get("status") != "Failed":
-            self.status.set("Only failed items can be reset to the input fields.")
+    def reset_item_to_inputs(self, index):
+        if index < 0 or index >= len(self.items):
+            self.status.set("Queue item was not found.")
             return
+
+        item = self.items[index]
 
         self.url.set(item.get("url", ""))
         self.custom_name.set(item.get("name", ""))
@@ -2393,7 +2531,7 @@ class QueuedMediaDownloader:
         self.reset_entry_undo_history(self.name_entry, self.custom_name)
         self.url_entry.focus_set()
         self.url_entry.selection_range(0, "end")
-        self.status.set("Failed item restored to inputs. Edit the link, then add it to the queue.")
+        self.status.set("Item restored to inputs. Edit the link, then add it to the queue.")
 
     def existing_saved_paths(self, item):
         return [
