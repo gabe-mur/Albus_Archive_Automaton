@@ -1,4 +1,4 @@
 pyinstaller
 imageio-ffmpeg
-yt-dlp
+yt-dlp[default]
 gallery-dl

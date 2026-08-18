@@ -12,6 +12,7 @@ import shutil
 import signal
 import ssl
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -1467,6 +1468,14 @@ class QueuedMediaDownloader:
     def try_discovered_direct_media(self, page_url, folder, custom_name, cookies_browser=None, mode="video"):
         """Try direct media URLs scraped from a page after yt-dlp fails."""
         self.log_message("")
+
+        if self.is_youtube_url(page_url):
+            self.log_message(
+                "Skipping direct-media page scan for YouTube; its apparent media URLs "
+                "are manifests or signed streams that must be handled by yt-dlp."
+            )
+            return False
+
         self.log_message("yt-dlp failed. Scanning this page once for direct media URLs...")
         self.safe_progress_status("Scanning page for direct media URLs...")
         if cookies_browser:
@@ -1688,6 +1697,10 @@ class QueuedMediaDownloader:
         host = (parsed.hostname or "").lower()
         return host == "open.spotify.com" and parsed.path.startswith("/episode/")
 
+    def is_youtube_url(self, url):
+        host = (urlparse(url).hostname or "").lower()
+        return host == "youtu.be" or host == "youtube.com" or host.endswith(".youtube.com")
+
     def is_spotify_preview_clip_url(self, url):
         parsed = urlparse(url)
         host = (parsed.hostname or "").lower()
@@ -1789,7 +1802,7 @@ class QueuedMediaDownloader:
         if gallery_dl:
             return [gallery_dl]
 
-        return ["python3", "-m", "gallery_dl"]
+        return [sys.executable, "-m", "gallery_dl"]
 
     def add_gallery_cookie_options(self, command, cookies_browser):
         if cookies_browser:
@@ -1821,11 +1834,7 @@ class QueuedMediaDownloader:
     def try_compatible_download(self, url, temp_dir, ffmpeg_path, cookies_browser=None):
         output_template = str(temp_dir / "%(title).180B [%(id)s].compatible.%(ext)s")
 
-        command = [
-            "python3",
-            "-m",
-            "yt_dlp",
-
+        command = self.yt_dlp_command() + [
             # First priority: 1080p-or-lower H.264 MP4 + M4A/AAC.
             "-f",
             "bv*[height<=1080][ext=mp4][vcodec^=avc1]+ba[ext=m4a]/b[height<=1080][ext=mp4]/b[ext=mp4]",
@@ -1859,11 +1868,7 @@ class QueuedMediaDownloader:
     def download_best_source(self, url, temp_dir, ffmpeg_path, cookies_browser=None):
         output_template = str(temp_dir / "%(title).180B [%(id)s].source.%(ext)s")
 
-        command = [
-            "python3",
-            "-m",
-            "yt_dlp",
-
+        command = self.yt_dlp_command() + [
             # Best available video + audio, up to 1080p.
             # Change height<=1080 to height<=2160 if you ever want 4K.
             "-f", "bv*[height<=1080]+ba/b[height<=1080]/b",
@@ -1899,11 +1904,7 @@ class QueuedMediaDownloader:
         audio_format = self.selected_audio_format()
         audio_quality = self.selected_audio_quality(audio_format)
 
-        command = [
-            "python3",
-            "-m",
-            "yt_dlp",
-
+        command = self.yt_dlp_command() + [
             # Prefer the source's best audio stream, or fall back to best media
             # so video-only/direct-media links can still produce audio.
             "-f", "ba/bestaudio/best",
@@ -1940,6 +1941,54 @@ class QueuedMediaDownloader:
             command.extend(["--cookies-from-browser", cookies_browser])
 
         return command
+
+    def yt_dlp_command(self):
+        command = [sys.executable, "-m", "yt_dlp"]
+        runtime = self.find_javascript_runtime()
+
+        if runtime:
+            name, path = runtime
+            command.extend(["--js-runtimes", f"{name}:{path}"])
+
+        return command
+
+    def find_javascript_runtime(self):
+        """Return a supported yt-dlp JavaScript runtime, including common macOS installs."""
+        runtime_executables = (
+            ("deno", "deno"),
+            ("node", "node"),
+            ("quickjs", "qjs"),
+            ("quickjs", "quickjs"),
+        )
+        for name, executable in runtime_executables:
+            path = shutil.which(executable)
+            if path:
+                return name, path
+
+        common_paths = (
+            ("deno", Path("/opt/homebrew/bin/deno")),
+            ("deno", Path("/usr/local/bin/deno")),
+            ("node", Path("/opt/homebrew/bin/node")),
+            ("node", Path("/usr/local/bin/node")),
+            ("quickjs", Path("/opt/homebrew/bin/qjs")),
+            ("quickjs", Path("/usr/local/bin/qjs")),
+        )
+        for name, path in common_paths:
+            if path.is_file() and os.access(path, os.X_OK):
+                return name, str(path)
+
+        nvm_versions = Path.home() / ".nvm" / "versions" / "node"
+
+        def node_version(path):
+            version_text = path.parent.parent.name.lstrip("v")
+            return tuple(int(part) if part.isdigit() else 0 for part in version_text.split("."))
+
+        node_paths = sorted(nvm_versions.glob("*/bin/node"), key=node_version, reverse=True)
+        for path in node_paths:
+            if path.is_file() and os.access(path, os.X_OK):
+                return "node", str(path)
+
+        return None
 
     def audio_file_extensions(self):
         return set(self.AUDIO_EXTENSIONS)

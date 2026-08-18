@@ -14,14 +14,13 @@ If Python is not installed, install Python from the official installer at https:
 
 ## Install dependencies
 
-Open Terminal and run these commands from this folder:
+Open Terminal and run this command from this folder:
 
 ```bash
 brew install ffmpeg
-python3 -m pip install -r requirements.txt
 ```
 
-These commands install the Homebrew packages and Python dependencies needed to run the app on macOS.
+Python dependencies are installed automatically into a local virtual environment (`.venv`) the first time you run the app launcher — see below.
 
 ## Run the app
 
@@ -30,6 +29,16 @@ Open the launcher file in this folder:
 ```text
 Open_Albus_Archive_Automaton.command
 ```
+
+The first launch creates a `.venv` folder in this directory and installs the packages from `requirements.txt` into it. This keeps the app's dependencies isolated from your system Python, so a `brew upgrade` won't break the app. If you upgrade Homebrew's Python to a new major version, delete the `.venv` folder and relaunch to rebuild it.
+
+If the app fails to launch with a `_tkinter` error, install the Tk support package for your Python version, e.g.:
+
+```bash
+brew install python-tk@3.14
+```
+
+(replace `3.14` with your `python3 --version`'s major.minor).
 
 If macOS shows a warning and blocks it, right-click the file, choose Open, and confirm. This is normal for unsigned scripts. If needed, you can also clear the quarantine flag once in Terminal:
 
@@ -51,5 +60,6 @@ xattr -dr com.apple.quarantine Open_Albus_Archive_Automaton.command
 ## Notes
 
 - The app uses yt-dlp for most downloads.
+- YouTube downloads require a supported JavaScript runtime. The app automatically uses Deno, Node.js, or QuickJS when one is installed; Node.js is available from `brew install node` if needed.
 - If yt-dlp fails, it can attempt to scan the page for direct media URLs.
 - Browser cookies are only used for yt-dlp-based downloads and are not saved by the app.
