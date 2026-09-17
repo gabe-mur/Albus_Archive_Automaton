@@ -1,4 +1,5 @@
 pyinstaller
 imageio-ffmpeg
-yt-dlp[default]
+Pillow
+yt-dlp[default]>=2026.8.19
 gallery-dl

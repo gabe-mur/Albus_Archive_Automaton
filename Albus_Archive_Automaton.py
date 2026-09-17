@@ -5,6 +5,7 @@ handle site-specific downloads, and ffmpeg handles media compatibility work.
 """
 
 import os
+import base64
 import json
 import queue
 import re
@@ -22,7 +23,7 @@ import html
 import imageio_ffmpeg
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
-from urllib.parse import unquote, urljoin, urlparse
+from urllib.parse import parse_qs, unquote, urljoin, urlparse
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
@@ -48,7 +49,13 @@ class QueuedMediaDownloader:
     HEADER_BACKGROUND_OVERSCAN = 1.0
     HEADER_BACKGROUND_FOCUS_X = 0.68
     HEADER_BACKGROUND_FOCUS_Y = 0.58
+    HEADER_BACKGROUND_WIDE_FOCUS_Y = 0.65
+    HEADER_BACKGROUND_WIDE_START = 900
+    HEADER_BACKGROUND_WIDE_END = 1500
     HEADER_BACKGROUND_FIT_MODE = "cover"
+    APP_ICON_MAX_SIZE = 256
+    APP_ICON_FOCUS_X = 0.72
+    APP_ICON_FOCUS_Y = 0.62
     APP_BACKGROUND_COLOR = "#0a1724"
     PANEL_BACKGROUND_COLOR = "#2d4352"
     FIELD_BACKGROUND_COLOR = "#203443"
@@ -131,7 +138,9 @@ class QueuedMediaDownloader:
         self.header_background_source = None
         self.header_background_image = None
         self.header_background_render_key = None
+        self.app_icon_image = None
 
+        self.configure_window_icon()
         self.load_app_state()
         self.build_ui()
         self.root.protocol("WM_DELETE_WINDOW", self.on_app_close)
@@ -494,6 +503,39 @@ class QueuedMediaDownloader:
         self.header_canvas.pack(fill="x", pady=(0, 10))
         self.header_canvas.bind("<Configure>", self.draw_header)
 
+    def configure_window_icon(self):
+        """Use a square Albus crop as the app icon without changing the banner renderer."""
+        background_path = Path(__file__).resolve().parent / self.HEADER_BACKGROUND_FILE
+        if not background_path.exists():
+            return
+
+        try:
+            source = self.load_tk_photo_image(background_path)
+            side = min(source.width(), source.height())
+            focus_x = int(source.width() * self.APP_ICON_FOCUS_X)
+            focus_y = int(source.height() * self.APP_ICON_FOCUS_Y)
+            left = min(source.width() - side, max(0, focus_x - side // 2))
+            top = min(source.height() - side, max(0, focus_y - side // 2))
+            subsample = max(1, (side + self.APP_ICON_MAX_SIZE - 1) // self.APP_ICON_MAX_SIZE)
+            icon_size = (side + subsample - 1) // subsample
+            icon = tk.PhotoImage(width=icon_size, height=icon_size)
+            icon.tk.call(
+                str(icon),
+                "copy",
+                str(source),
+                "-from", left, top, left + side, top + side,
+                "-subsample", subsample, subsample
+            )
+            self.app_icon_image = icon
+            self.root.iconphoto(True, self.app_icon_image)
+        except (OSError, tk.TclError, ValueError):
+            self.app_icon_image = None
+
+    def load_tk_photo_image(self, path):
+        """Load image bytes directly, avoiding Tk 9's macOS file-thumbnail substitution."""
+        encoded = base64.b64encode(Path(path).read_bytes())
+        return tk.PhotoImage(data=encoded)
+
     def load_header_background_source(self):
         background_path = Path(__file__).resolve().parent / self.HEADER_BACKGROUND_FILE
         if not background_path.exists():
@@ -503,7 +545,7 @@ class QueuedMediaDownloader:
             if Image is not None:
                 return Image.open(background_path).convert("RGB")
 
-            return tk.PhotoImage(file=str(background_path))
+            return self.load_tk_photo_image(background_path)
         except Exception:
             return None
 
@@ -623,11 +665,27 @@ class QueuedMediaDownloader:
         max_left = max(0, resized.width - width)
         max_top = max(0, resized.height - height)
         focus_x = int(resized.width * self.HEADER_BACKGROUND_FOCUS_X)
-        focus_y = int(resized.height * self.HEADER_BACKGROUND_FOCUS_Y)
+        focus_y = int(resized.height * self.header_background_focus_y(width))
         left = min(max_left, max(0, focus_x - width // 2))
         top = min(max_top, max(0, focus_y - height // 2))
         cropped = resized.crop((left, top, left + width, top + height))
         return ImageTk.PhotoImage(cropped)
+
+    def header_background_focus_y(self, width):
+        if width <= self.HEADER_BACKGROUND_WIDE_START:
+            return self.HEADER_BACKGROUND_FOCUS_Y
+        if width >= self.HEADER_BACKGROUND_WIDE_END:
+            return self.HEADER_BACKGROUND_WIDE_FOCUS_Y
+
+        progress = (
+            (width - self.HEADER_BACKGROUND_WIDE_START)
+            / (self.HEADER_BACKGROUND_WIDE_END - self.HEADER_BACKGROUND_WIDE_START)
+        )
+        smooth_progress = progress * progress * (3 - 2 * progress)
+        return self.HEADER_BACKGROUND_FOCUS_Y + (
+            (self.HEADER_BACKGROUND_WIDE_FOCUS_Y - self.HEADER_BACKGROUND_FOCUS_Y)
+            * smooth_progress
+        )
 
     # App state persistence ----------------------------------------------
 
@@ -1466,7 +1524,7 @@ class QueuedMediaDownloader:
     # Direct media discovery fallback ------------------------------------
 
     def try_discovered_direct_media(self, page_url, folder, custom_name, cookies_browser=None, mode="video"):
-        """Try direct media URLs scraped from a page after yt-dlp fails."""
+        """Try media URLs and supported embeds scraped after yt-dlp fails."""
         self.log_message("")
 
         if self.is_youtube_url(page_url):
@@ -1476,16 +1534,16 @@ class QueuedMediaDownloader:
             )
             return False
 
-        self.log_message("yt-dlp failed. Scanning this page once for direct media URLs...")
-        self.safe_progress_status("Scanning page for direct media URLs...")
+        self.log_message("yt-dlp failed. Scanning this page once for media URLs and supported embeds...")
+        self.safe_progress_status("Scanning page for media URLs...")
         if cookies_browser:
             self.log_message("Browser cookies apply only to yt-dlp for now; the page scanner will not read browser cookies.")
 
         candidates = self.discover_direct_media_urls(page_url, mode=mode)
-        self.log_message(f"Found {len(candidates)} candidate direct media URL(s).")
+        self.log_message(f"Found {len(candidates)} candidate media URL(s).")
 
         for index, candidate in enumerate(candidates, start=1):
-            media_type = self.media_url_extension(candidate).upper().lstrip(".") or "MEDIA"
+            media_type = self.discovered_media_type(candidate)
             self.log_message(f"{index}. [{media_type}] {candidate}")
 
         for index, candidate in enumerate(candidates, start=1):
@@ -1503,16 +1561,16 @@ class QueuedMediaDownloader:
                 saved_paths = self.download_video(candidate, folder, custom_name, cookies_browser, allow_discovery=False)
             if saved_paths:
                 self.log_message("")
-                self.log_message("Downloaded using discovered direct media URL.")
+                self.log_message("Downloaded using a discovered media URL.")
                 return saved_paths
 
         if candidates:
-            self.log_message("All discovered direct media URL candidates failed.")
+            self.log_message("All discovered media URL candidates failed.")
 
         return False
 
     def discover_direct_media_urls(self, page_url, mode="video"):
-        """Fetch one page and extract direct media links without crawling."""
+        """Fetch one page and extract direct media links or supported embeds."""
         try:
             request = Request(
                 page_url,
@@ -1540,6 +1598,16 @@ class QueuedMediaDownloader:
         text = raw.decode(encoding, errors="replace")
         title = self.extract_page_title(text)
         candidates = self.extract_media_urls_from_text(text, base_url=page_url, mode=mode)
+        if mode in {"video", "audio"}:
+            seen = set(candidates)
+            for candidate in self.extract_brightcove_embed_urls(text):
+                self.add_media_candidate(
+                    candidates,
+                    seen,
+                    candidate,
+                    mode=mode,
+                    allow_supported_embed=True
+                )
         candidates = self.filter_discovered_media_candidates(candidates, page_url)
         return self.rank_media_candidates(candidates, page_url=page_url, page_title=title, mode=mode)
 
@@ -1598,7 +1666,15 @@ class QueuedMediaDownloader:
 
         return candidates
 
-    def add_media_candidate(self, candidates, seen, url, base_url=None, mode="video"):
+    def add_media_candidate(
+        self,
+        candidates,
+        seen,
+        url,
+        base_url=None,
+        mode="video",
+        allow_supported_embed=False
+    ):
         url = self.clean_media_url(url)
         if base_url:
             url = urljoin(base_url, url)
@@ -1607,7 +1683,9 @@ class QueuedMediaDownloader:
         if parsed.scheme not in {"http", "https"}:
             return
 
-        if not self.is_direct_media_url(url, mode=mode):
+        if not self.is_direct_media_url(url, mode=mode) and not (
+            allow_supported_embed and self.is_supported_media_embed_url(url)
+        ):
             return
 
         key = url
@@ -1616,6 +1694,74 @@ class QueuedMediaDownloader:
 
         seen.add(key)
         candidates.append(url)
+
+    def extract_brightcove_embed_urls(self, text):
+        """Build yt-dlp-compatible Brightcove URLs from embedded page metadata."""
+        normalized = html.unescape(text).replace("\\/", "/").replace('\\"', '"')
+        seen = set()
+        candidates = []
+
+        explicit_pattern = re.compile(
+            r"https?://players\.brightcove\.net/\d+/[A-Za-z0-9_-]+_default/"
+            r"index(?:\.min)?\.html\?[^\s\"'<>]*\bvideoId=\d+",
+            re.IGNORECASE
+        )
+        for match in explicit_pattern.finditer(normalized):
+            candidate = self.clean_media_url(match.group(0))
+            if candidate not in seen:
+                seen.add(candidate)
+                candidates.append(candidate)
+
+        config_match = re.search(
+            r'"VIDEO_PLAYER"\s*:\s*\{\s*"NETWORK"\s*:\s*\{([^{}]{1,1000})\}',
+            normalized,
+            re.IGNORECASE
+        )
+        if not config_match:
+            return candidates
+
+        config = config_match.group(1)
+        account_match = re.search(r'"ACCOUNT_ID"\s*:\s*"(\d+)"', config, re.IGNORECASE)
+        player_match = re.search(r'"PLAYER_ID"\s*:\s*"([A-Za-z0-9_-]+)"', config, re.IGNORECASE)
+        if not account_match or not player_match:
+            return candidates
+
+        provider_pattern = re.compile(
+            r'"provider"\s*:\s*\{(?=[^{}]{0,500}"type"\s*:\s*"brightcove")'
+            r'[^{}]{0,500}?"id"\s*:\s*"(\d+)"[^{}]*\}',
+            re.IGNORECASE
+        )
+        account_id = account_match.group(1)
+        player_id = player_match.group(1)
+        for match in provider_pattern.finditer(normalized):
+            video_id = match.group(1)
+            candidate = (
+                f"https://players.brightcove.net/{account_id}/{player_id}_default/"
+                f"index.html?videoId={video_id}"
+            )
+            if candidate not in seen:
+                seen.add(candidate)
+                candidates.append(candidate)
+
+        return candidates
+
+    def is_supported_media_embed_url(self, url):
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").lower()
+        if host != "players.brightcove.net":
+            return False
+
+        if not re.fullmatch(r"/\d+/[A-Za-z0-9_-]+_default/index(?:\.min)?\.html", parsed.path):
+            return False
+
+        video_ids = parse_qs(parsed.query).get("videoId", [])
+        return bool(video_ids and video_ids[0].isdigit())
+
+    def discovered_media_type(self, url):
+        if self.is_supported_media_embed_url(url):
+            return "BRIGHTCOVE"
+
+        return self.media_url_extension(url).upper().lstrip(".") or "MEDIA"
 
     def clean_media_url(self, url):
         url = html.unescape(url.strip())
@@ -1631,6 +1777,7 @@ class QueuedMediaDownloader:
 
     def rank_media_candidates(self, candidates, page_url=None, page_title=None, mode="video"):
         keywords = self.page_keywords(page_url, page_title)
+        original_order = {candidate: index for index, candidate in enumerate(candidates)}
 
         def score(candidate):
             parsed = urlparse(candidate)
@@ -1638,7 +1785,9 @@ class QueuedMediaDownloader:
             full_url = candidate.lower()
             extension = self.media_url_extension(candidate)
 
-            if mode == "audio":
+            if self.is_supported_media_embed_url(candidate):
+                type_rank = 0
+            elif mode == "audio":
                 type_rank = {
                     ".m4a": 0,
                     ".mp3": 1,
@@ -1668,7 +1817,12 @@ class QueuedMediaDownloader:
             keyword_bonus = -1 if any(keyword in path for keyword in keywords) else 0
             scheme_penalty = 1 if parsed.scheme == "http" else 0
 
-            return (type_rank + tracker_penalty + keyword_bonus + scheme_penalty, len(candidate), candidate)
+            return (
+                type_rank + tracker_penalty + keyword_bonus + scheme_penalty,
+                len(candidate),
+                original_order[candidate],
+                candidate
+            )
 
         return sorted(candidates, key=score)
 
